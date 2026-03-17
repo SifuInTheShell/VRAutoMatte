@@ -140,6 +140,40 @@ class MainWindow(QMainWindow):
         self.info_label = QLabel("")
         io_layout.addWidget(self.info_label)
 
+        # Frame range (optional)
+        range_row = QHBoxLayout()
+        range_row.addWidget(QLabel("Frame range:"))
+        self.start_frame_edit = QLineEdit()
+        self.start_frame_edit.setPlaceholderText("Start")
+        self.start_frame_edit.setFixedWidth(80)
+        self.start_frame_edit.setToolTip(
+            "First frame to process (1-based). "
+            "Leave empty for start of video."
+        )
+        range_row.addWidget(self.start_frame_edit)
+        range_row.addWidget(QLabel("–"))
+        self.end_frame_edit = QLineEdit()
+        self.end_frame_edit.setPlaceholderText("End")
+        self.end_frame_edit.setFixedWidth(80)
+        self.end_frame_edit.setToolTip(
+            "Last frame to process (inclusive). "
+            "Leave empty for end of video."
+        )
+        range_row.addWidget(self.end_frame_edit)
+        self.range_info = QLabel("")
+        self.range_info.setStyleSheet(
+            "font-size: 10px; font-style: italic;"
+        )
+        range_row.addWidget(self.range_info)
+        range_row.addStretch()
+        self.start_frame_edit.textChanged.connect(
+            lambda: self._update_range_info()
+        )
+        self.end_frame_edit.textChanged.connect(
+            lambda: self._update_range_info()
+        )
+        io_layout.addLayout(range_row)
+
         root.addWidget(io_group)
 
         # ── Settings ──
@@ -600,6 +634,28 @@ class MainWindow(QMainWindow):
         if self.input_edit.text():
             self._auto_output_name(self.input_edit.text())
 
+    def _update_range_info(self):
+        """Show duration hint based on start/end frame inputs."""
+        if not self._video_info:
+            self.range_info.setText("")
+            return
+        fps = float(self._video_info.get("fps", 30))
+        total = self._video_info.get("num_frames", 0)
+        start_text = self.start_frame_edit.text().strip()
+        end_text = self.end_frame_edit.text().strip()
+        if not start_text and not end_text:
+            self.range_info.setText("")
+            return
+        start = int(start_text) if start_text else 1
+        end = int(end_text) if end_text else total
+        start = max(1, min(start, total))
+        end = max(start, min(end, total))
+        count = end - start + 1
+        secs = count / fps if fps > 0 else 0
+        self.range_info.setText(
+            f"({count:,} frames, ~{secs:.1f}s)"
+        )
+
     def _on_frame_scrubbed(self, frame_num: int):
         """Handle scrubber seek — extract and show source frame."""
         input_path = self.input_edit.text()
@@ -671,6 +727,10 @@ class MainWindow(QMainWindow):
             f"font-size: 10px; font-style: italic;"
         )
         self.preview.apply_colors(c)
+        self.range_info.setStyleSheet(
+            f"color: {c['sbs_auto']}; font-size: 10px; "
+            f"font-style: italic;"
+        )
 
     def _on_model_changed(self, index: int):
         """Handle model combo selection change.
@@ -759,6 +819,20 @@ class MainWindow(QMainWindow):
             is_sbs=self.sbs_check.isChecked(),
             pov_mode=self.pov_check.isChecked(),
         )
+
+        # Frame range
+        start_text = self.start_frame_edit.text().strip()
+        end_text = self.end_frame_edit.text().strip()
+        if start_text:
+            try:
+                config.start_frame = max(1, int(start_text))
+            except ValueError:
+                pass
+        if end_text:
+            try:
+                config.end_frame = max(1, int(end_text))
+            except ValueError:
+                pass
 
         if self.format_combo.currentIndex() == 1:
             config.output_format = OutputFormat.DEOVR_ALPHA
