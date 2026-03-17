@@ -24,6 +24,7 @@ _DEFAULTS = {
     "window_width": 900,
     "window_height": 780,
     "fisheye_mask_path": "",
+    "temp_dir": "",              # Custom temp directory (empty = system default)
 }
 
 

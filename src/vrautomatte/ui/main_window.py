@@ -389,6 +389,39 @@ class MainWindow(QMainWindow):
         sbs_row.addStretch()
         settings_layout.addLayout(sbs_row)
 
+        # Row 5: Temp directory
+        temp_row = QHBoxLayout()
+        temp_row.addWidget(QLabel("Temp directory:"))
+        self.temp_dir_edit = QLineEdit()
+        self.temp_dir_edit.setPlaceholderText(
+            "System default"
+        )
+        self.temp_dir_edit.setReadOnly(True)
+        self.temp_dir_edit.setToolTip(
+            "Directory for temporary frame files during "
+            "processing.\n\n"
+            "Large videos (8K, 100k+ frames) can require "
+            "hundreds of GB of temp space.\n"
+            "Choose a fast drive with enough free space.\n\n"
+            "Leave empty to use the system default temp "
+            "directory."
+        )
+        temp_row.addWidget(self.temp_dir_edit, stretch=1)
+        self.temp_browse_btn = QPushButton("Browse…")
+        self.temp_browse_btn.clicked.connect(
+            self._browse_temp_dir
+        )
+        temp_row.addWidget(self.temp_browse_btn)
+        self.temp_clear_btn = QPushButton("Reset")
+        self.temp_clear_btn.setToolTip(
+            "Reset to system default temp directory"
+        )
+        self.temp_clear_btn.clicked.connect(
+            lambda: self.temp_dir_edit.clear()
+        )
+        temp_row.addWidget(self.temp_clear_btn)
+        settings_layout.addLayout(temp_row)
+
         root.addWidget(settings_group)
 
         # ── Preview ──
@@ -485,6 +518,7 @@ class MainWindow(QMainWindow):
         self.codec_combo.setCurrentIndex(s.get("codec", 0))
         self.sbs_check.setChecked(s.get("is_sbs", False))
         self.pov_check.setChecked(s.get("pov_mode", False))
+        self.temp_dir_edit.setText(s.get("temp_dir", ""))
         self.resize(
             s.get("window_width", 900),
             s.get("window_height", 780),
@@ -503,6 +537,7 @@ class MainWindow(QMainWindow):
             "is_sbs": self.sbs_check.isChecked(),
             "pov_mode": self.pov_check.isChecked(),
             "dark_theme": self._is_dark,
+            "temp_dir": self.temp_dir_edit.text(),
             "window_width": self.width(),
             "window_height": self.height(),
         })
@@ -678,6 +713,15 @@ class MainWindow(QMainWindow):
             self._settings["last_output_dir"] = str(
                 Path(path).parent
             )
+
+    def _browse_temp_dir(self):
+        """Let user pick a custom temp directory."""
+        start_dir = self.temp_dir_edit.text() or ""
+        path = QFileDialog.getExistingDirectory(
+            self, "Select Temp Directory", start_dir,
+        )
+        if path:
+            self.temp_dir_edit.setText(path)
 
     def _auto_output_name(self, input_path: str):
         """Generate a default output filename based on input."""
@@ -913,6 +957,7 @@ class MainWindow(QMainWindow):
             crf=self.crf_slider.value(),
             is_sbs=self.sbs_check.isChecked(),
             pov_mode=self.pov_check.isChecked(),
+            temp_dir=self.temp_dir_edit.text(),
         )
 
         # Frame range
