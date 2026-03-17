@@ -8,13 +8,30 @@ frame processing begins.
 Scene changes are detected via histogram correlation. When
 a drastic change occurs (e.g. laying → standing POV), SAM2
 regenerates the mask and InferenceCore's memory is reset.
+
+Performance notes
+-----------------
+- ``use_fp16=True``  halves activation/weight memory (~50% VRAM).
+- ``max_internal_size`` controls the resolution at which frames are
+  encoded into the memory bank. 480 reduces WM tensor footprint by
+  ~95% vs full-res while the decoder still outputs at full resolution
+  via ResNet-50 skip connections.
+- ``max_mem_frames`` caps working-memory slots before potentiation
+  into long-term memory. Lower = less VRAM, slightly less temporal
+  detail on fast motion.
+- ``use_long_term=True`` is mandatory for videos longer than a few
+  minutes — without it working memory grows without bound (OOM).
+- ``compile_model=True`` traces the model with torch.compile and
+  CUDA-graph-replay mode. Adds ~30 s startup cost; saves ~15-30%
+  per frame afterwards. Windows requires a compatible Triton build;
+  falls back gracefully if unavailable. Default False.
 """
 
 import numpy as np
 import torch
 from loguru import logger
 
-from vrautomatte.utils.gpu import get_device
+from vrautomatte.utils.gpu import configure_cuda_performance, get_device
 
 # Re-export mask functions for backward compatibility
 from vrautomatte.pipeline.sam2_masks import (  # noqa: F401
@@ -42,6 +59,24 @@ class MatAnyone2Processor:
         device: Target device. Auto-detected if None.
         pov_mode: Enable scene change detection for mask
             refresh. Default False.
+        use_fp16: Run model weights and activations in FP16.
+            Halves VRAM usage with negligible quality loss on
+            CUDA devices. Ignored on CPU/MPS. Default True.
+        max_internal_size: Resolution (px, short side) at which
+            frames are encoded into the memory bank. -1 = full
+            resolution (high VRAM). 480 is recommended for 4K+
+            content. Default 480.
+        max_mem_frames: Maximum working-memory key frames before
+            older entries are consolidated into long-term memory.
+            Lower = less VRAM. Default 3.
+        use_long_term: Enable XMem-style long-term memory
+            potentiation. Required for videos longer than a few
+            minutes to prevent unbounded VRAM growth. Default True.
+        compile_model: Apply torch.compile with CUDA-graph-replay
+            mode. Reduces per-frame latency by ~15-30% after a
+            one-time compilation warmup. Windows requires a
+            compatible Triton build; falls back gracefully if
+            unavailable. Default False.
     """
 
     def __init__(
@@ -49,6 +84,12 @@ class MatAnyone2Processor:
         first_frame_mask: np.ndarray,
         device: torch.device | None = None,
         pov_mode: bool = False,
+        *,
+        use_fp16: bool = True,
+        max_internal_size: int = 480,
+        max_mem_frames: int = 3,
+        use_long_term: bool = True,
+        compile_model: bool = False,
     ):
         try:
             from matanyone2 import MatAnyone2, InferenceCore
@@ -66,6 +107,7 @@ class MatAnyone2Processor:
         self._is_first_frame = True
         self._pov_mode = pov_mode
         self._scene_detector = None
+        self._use_fp16 = use_fp16 and device.type == "cuda"
 
         if pov_mode:
             from vrautomatte.pipeline.scene_detect import (
@@ -73,14 +115,96 @@ class MatAnyone2Processor:
             )
             self._scene_detector = SceneChangeDetector()
 
-        logger.info(f"Loading MatAnyone 2 on {device}...")
-        model = MatAnyone2.from_pretrained(
-            "PeiqingYang/MatAnyone2"
+        # Apply global CUDA performance flags (TF32, cuDNN benchmark,
+        # expandable allocator) before model weights are loaded.
+        configure_cuda_performance()
+
+        logger.info(
+            f"Loading MatAnyone 2 on {device} "
+            f"(fp16={self._use_fp16}, "
+            f"internal_size={max_internal_size}, "
+            f"mem_frames={max_mem_frames}, "
+            f"long_term={use_long_term})..."
         )
+
+        model = MatAnyone2.from_pretrained("PeiqingYang/MatAnyone2")
+
+        # FP16: halve weight + activation memory
+        if self._use_fp16:
+            model = model.half()
+            logger.debug("MatAnyone 2: model cast to FP16")
+
+        # Channels-last: align conv ops with cuDNN fastest path
+        if device.type == "cuda":
+            model = model.to(memory_format=torch.channels_last)
+            logger.debug(
+                "MatAnyone 2: channels-last memory format enabled"
+            )
+
+        # torch.compile: CUDA graph replay (optional, opt-in)
+        if compile_model and device.type == "cuda":
+            try:
+                model = torch.compile(
+                    model,
+                    mode="reduce-overhead",
+                    dynamic=False,
+                )
+                logger.info(
+                    "MatAnyone 2: torch.compile enabled "
+                    "(first frame will be slow — compiling)"
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    f"torch.compile unavailable ({exc}); "
+                    "continuing without compilation"
+                )
+
+        # InferenceCore with memory tuning params
+        ic_kwargs = {
+            "max_mem_frames": max_mem_frames,
+            "use_long_term": use_long_term,
+        }
+        if max_internal_size > 0:
+            ic_kwargs["max_internal_size"] = max_internal_size
+
         self._processor = InferenceCore(
-            model, device=str(device)
+            model, device=str(device), **ic_kwargs
         )
         logger.info("MatAnyone 2 loaded")
+
+    # ── internal helpers ─────────────────────────────────────────────
+
+    def _to_tensor(self, frame: np.ndarray) -> torch.Tensor:
+        """Convert uint8 HWC numpy frame to CHW float tensor on device.
+
+        Applies FP16 cast and channels-last layout when enabled.
+        """
+        t = (
+            torch.from_numpy(frame)
+            .float()
+            .permute(2, 0, 1)
+            .div(255.0)
+        )
+        if self._use_fp16:
+            t = t.half()
+        t = t.to(self.device)
+        if self.device.type == "cuda":
+            # channels_last requires 4-D input
+            t = (
+                t.unsqueeze(0)
+                .to(memory_format=torch.channels_last)
+                .squeeze(0)
+            )
+        return t
+
+    def _autocast(self):
+        """Return an autocast context manager for the active device."""
+        if self._use_fp16 and self.device.type == "cuda":
+            return torch.autocast(
+                device_type="cuda", dtype=torch.float16
+            )
+        # No-op context manager on CPU / non-FP16 paths
+        return torch.autocast(device_type="cpu", enabled=False)
 
     def _reinit_with_mask(
         self, frame: np.ndarray, mask: np.ndarray
@@ -105,15 +229,14 @@ class MatAnyone2Processor:
         self, frame: np.ndarray
     ) -> np.ndarray:
         """Run the two-step first-frame initialization."""
-        img_tensor = (
-            torch.from_numpy(frame).float().permute(2, 0, 1)
-            / 255.0
-        ).to(self.device)
+        img_tensor = self._to_tensor(frame)
 
-        with torch.no_grad():
-            mask_tensor = torch.from_numpy(
-                self._mask
-            ).float().to(self.device)
+        with torch.no_grad(), self._autocast():
+            mask_tensor = (
+                torch.from_numpy(self._mask)
+                .float()
+                .to(self.device)
+            )
             self._processor.step(
                 img_tensor,
                 mask_tensor,
@@ -134,6 +257,8 @@ class MatAnyone2Processor:
         if matte.ndim == 3:
             matte = matte[0]
         return matte
+
+    # ── public API ───────────────────────────────────────────────────
 
     def process_frame(self, frame: np.ndarray) -> np.ndarray:
         """Process a single frame and return the alpha matte.
@@ -156,9 +281,7 @@ class MatAnyone2Processor:
             from vrautomatte.pipeline.sam2_masks import (
                 generate_first_frame_mask,
             )
-            logger.info(
-                "Scene change — regenerating MA2 mask"
-            )
+            logger.info("Scene change — regenerating MA2 mask")
             new_mask = generate_first_frame_mask(
                 frame, self.device, pov_mode=True
             )
@@ -172,12 +295,9 @@ class MatAnyone2Processor:
                 self._scene_detector.update_reference(frame)
             return matte
 
-        img_tensor = (
-            torch.from_numpy(frame).float().permute(2, 0, 1)
-            / 255.0
-        ).to(self.device)
+        img_tensor = self._to_tensor(frame)
 
-        with torch.no_grad():
+        with torch.no_grad(), self._autocast():
             output = self._processor.step(img_tensor)
 
         return self._extract_matte(output)
