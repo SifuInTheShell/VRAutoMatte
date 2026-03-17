@@ -21,7 +21,7 @@ import numpy as np
 from loguru import logger
 from PIL import Image
 
-from vrautomatte.pipeline.matte import RVMProcessor
+from vrautomatte.pipeline.matte import create_processor
 from vrautomatte.utils.ffmpeg import (
     check_ffmpeg,
     convert_to_fisheye,
@@ -50,7 +50,7 @@ class PipelineConfig:
     output_path: str = ""
 
     # Matting settings
-    model_variant: str = "mobilenetv3"   # 'mobilenetv3' or 'resnet50'
+    model_variant: str = "mobilenetv3"   # mobilenetv3/resnet50/matanyone2
     downsample_ratio: float = 0.25       # RVM processing scale
 
     # Output settings
@@ -163,9 +163,24 @@ class Pipeline:
             # ── Stage 2: Generate mattes ──
             logger.info("Stage 2: Generating AI mattes...")
             self._matte_start_time = time.monotonic()
-            processor = RVMProcessor(
+
+            # For MatAnyone 2, load the first frame for SAM2 mask
+            first_frame = None
+            if config.model_variant == "matanyone2":
+                self._emit(PipelineProgress(
+                    stage="Generating first-frame mask",
+                    stage_num=2,
+                    total_stages=self._total_stages(),
+                ))
+                first_img = Image.open(
+                    frame_files[0]
+                ).convert("RGB")
+                first_frame = np.array(first_img)
+
+            processor = create_processor(
                 variant=config.model_variant,
                 downsample_ratio=config.downsample_ratio,
+                first_frame=first_frame,
             )
 
             for i, frame_file in enumerate(frame_files):
@@ -200,7 +215,7 @@ class Pipeline:
                         fps=fps,
                     ))
 
-            del processor  # free GPU memory
+            processor.cleanup()  # free GPU memory
 
             # ── Stage 3: Reassemble matte video ──
             logger.info("Stage 3: Assembling matte video...")

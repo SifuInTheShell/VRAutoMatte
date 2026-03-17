@@ -267,7 +267,9 @@ class MainWindow(QMainWindow):
         row1.addWidget(QLabel("Matting Model:"))
         self.model_combo = QComboBox()
         self.model_combo.addItems([
-            "mobilenetv3 (fast)", "resnet50 (quality)"
+            "mobilenetv3 (fast)",
+            "resnet50 (quality)",
+            "MatAnyone 2 (quality+)",
         ])
         row1.addWidget(self.model_combo)
         row1.addSpacing(20)
@@ -570,12 +572,21 @@ class MainWindow(QMainWindow):
         self.fov_label.setText(f"{value}°")
 
     def _update_device_label(self):
+        """Update device info label, warn if CPU-only."""
         try:
             info = get_device_info()
             text = f"Device: {info['name']}"
             if "vram_gb" in info:
                 text += f" ({info['vram_gb']} GB)"
             self.device_label.setText(text)
+
+            if info["device"] == "cpu":
+                self.device_label.setStyleSheet(
+                    "color: #e0a040; font-size: 11px;"
+                )
+                self.device_label.setText(
+                    "⚠️ CPU mode — processing will be slower"
+                )
         except Exception:
             self.device_label.setText("Device: unknown")
 
@@ -589,7 +600,11 @@ class MainWindow(QMainWindow):
             output_path: Override output (for batch mode).
         """
         ds_map = {0: 0.125, 1: 0.25, 2: 0.5, 3: 1.0}
-        model_map = {0: "mobilenetv3", 1: "resnet50"}
+        model_map = {
+            0: "mobilenetv3",
+            1: "resnet50",
+            2: "matanyone2",
+        }
 
         config = PipelineConfig(
             input_path=input_path or self.input_edit.text(),
