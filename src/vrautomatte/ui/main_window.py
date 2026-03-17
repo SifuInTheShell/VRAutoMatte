@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QDialog,
     QFileDialog,
     QGroupBox,
     QHBoxLayout,
@@ -19,6 +20,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMainWindow,
     QMessageBox,
+    QPlainTextEdit,
     QProgressBar,
     QPushButton,
     QSlider,
@@ -41,7 +43,7 @@ from vrautomatte.ui.themes import (
     LIGHT_COLORS,
     LIGHT_STYLE,
 )
-from vrautomatte.ui.worker import PipelineWorker
+from vrautomatte.ui.worker import InstallWorker, PipelineWorker
 from vrautomatte.utils.ffmpeg import check_ffmpeg, get_video_info
 from vrautomatte.utils.gpu import get_device_info
 from vrautomatte.utils.masks import ensure_mask, get_mask_path
@@ -801,18 +803,7 @@ class MainWindow(QMainWindow):
             or self.pov_check.isChecked()
         )
         if needs_sam2 and not self._ma2_available:
-            feature = (
-                "MatAnyone 2"
-                if self.model_combo.currentIndex() == 2
-                else "POV mode"
-            )
-            QMessageBox.warning(
-                self, "Missing Dependencies",
-                f"{feature} requires SAM2 which is not "
-                f"installed.\n\n"
-                f"Install with:\n"
-                f"  uv sync --extra matanyone2",
-            )
+            self._offer_install_matanyone2()
             return
 
         config = self._build_config()
@@ -918,6 +909,84 @@ class MainWindow(QMainWindow):
             "  Mac: brew install ffmpeg\n"
             "  Linux: sudo apt install ffmpeg",
         )
+
+    def _offer_install_matanyone2(self):
+        """Ask user to install MatAnyone 2 deps, then install."""
+        feature = (
+            "MatAnyone 2"
+            if self.model_combo.currentIndex() == 2
+            else "POV mode"
+        )
+        reply = QMessageBox.question(
+            self,
+            "Install MatAnyone 2?",
+            f"{feature} requires MatAnyone 2 and SAM2 "
+            f"which are not yet installed.\n\n"
+            f"Download and install now?\n"
+            f"(This may take a few minutes.)",
+            QMessageBox.StandardButton.Yes
+            | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        self._run_install_matanyone2()
+
+    def _run_install_matanyone2(self):
+        """Run the MatAnyone 2 install in a background thread."""
+        # Build a progress dialog
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Installing MatAnyone 2…")
+        dlg.setMinimumSize(560, 320)
+        dlg.setModal(True)
+        layout = QVBoxLayout(dlg)
+
+        status = QLabel("Installing dependencies…")
+        status.setStyleSheet(
+            "font-weight: 600; font-size: 13px;"
+        )
+        layout.addWidget(status)
+
+        log_box = QPlainTextEdit()
+        log_box.setReadOnly(True)
+        log_box.setStyleSheet(
+            "font-family: 'Cascadia Code', 'Consolas', "
+            "monospace; font-size: 11px;"
+        )
+        layout.addWidget(log_box)
+
+        close_btn = QPushButton("Close")
+        close_btn.setEnabled(False)
+        close_btn.clicked.connect(dlg.accept)
+        layout.addWidget(close_btn)
+
+        worker = InstallWorker()
+
+        def on_output(line: str):
+            log_box.appendPlainText(line)
+            # Auto-scroll to bottom
+            sb = log_box.verticalScrollBar()
+            sb.setValue(sb.maximum())
+
+        def on_finished(success: bool):
+            close_btn.setEnabled(True)
+            if success:
+                status.setText("✅ Installation complete!")
+                self._ma2_available = True
+                self.model_combo.setItemText(
+                    2, "MatAnyone 2 (quality+)"
+                )
+                self.model_combo.model().item(2).setEnabled(
+                    True
+                )
+            else:
+                status.setText("❌ Installation failed")
+
+        worker.output.connect(on_output)
+        worker.finished.connect(on_finished)
+        # Store ref to prevent GC
+        dlg._worker = worker
+        worker.start()
+        dlg.exec()
 
     def _cancel_processing(self):
         if self.worker:
