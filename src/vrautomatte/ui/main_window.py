@@ -365,7 +365,9 @@ class MainWindow(QMainWindow):
         self.pov_check = QCheckBox("POV Mode")
         self.pov_check.setToolTip(
             "Remove POV body and background — keep only "
-            "the other person. Requires MatAnyone 2."
+            "the other person.\n"
+            "• MatAnyone 2: best quality (instance matting)\n"
+            "• RVM: fast but rough (static mask subtraction)"
         )
         self.pov_check.stateChanged.connect(
             self._update_pov_warning
@@ -751,16 +753,23 @@ class MainWindow(QMainWindow):
         self.fov_label.setText(f"{value}°")
 
     def _update_pov_warning(self, *_args):
-        """Show warning if POV is on without MatAnyone 2."""
-        if (
-            self.pov_check.isChecked()
-            and self.model_combo.currentIndex() != 2
-        ):
+        """Show info about POV quality per model."""
+        if not self.pov_check.isChecked():
+            self.pov_warning.setText("")
+        elif self.model_combo.currentIndex() == 2:
             self.pov_warning.setText(
-                "⚠️ POV requires MatAnyone 2"
+                "✓ Best quality (instance matting)"
+            )
+            self.pov_warning.setStyleSheet(
+                "color: #60c060; font-size: 11px;"
             )
         else:
-            self.pov_warning.setText("")
+            self.pov_warning.setText(
+                "⚡ Fast mode (static mask subtraction)"
+            )
+            self.pov_warning.setStyleSheet(
+                "color: #e0a040; font-size: 11px;"
+            )
 
     def _update_device_label(self):
         """Update device info label, warn if CPU-only."""
