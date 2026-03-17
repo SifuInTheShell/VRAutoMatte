@@ -60,6 +60,26 @@ def get_video_info(path: str | Path) -> dict:
     }
 
 
+def has_audio(path: str | Path) -> bool:
+    """Check whether a video file contains an audio stream.
+
+    Args:
+        path: Path to the video file.
+
+    Returns:
+        True if the file has at least one audio stream.
+    """
+    cmd = [
+        "ffprobe", "-v", "quiet",
+        "-select_streams", "a",
+        "-show_entries", "stream=codec_type",
+        "-of", "csv=p=0",
+        str(path),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    return bool(result.stdout.strip())
+
+
 def extract_frame(video_path: str | Path, frame_num: int,
                   output_path: str | Path) -> Path:
     """Extract a single frame from a video as PNG.

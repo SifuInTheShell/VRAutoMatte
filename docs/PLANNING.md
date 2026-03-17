@@ -35,12 +35,14 @@ and produce a file ready for DeoVR passthrough playback on Quest headsets.
 - [ ] **MatAnyone 2** support — CVPR 2026 state-of-the-art, better edge quality
       (requires SAM2 for first-frame mask auto-generation)
 - [ ] **VideoMaMa** support — Adobe's generative matting approach
-- [ ] **Batch processing** — queue multiple videos
-- [ ] **Auto-download DeoVR mask** — bundle or download mask8k.png
+- [x] **Batch processing** — queue multiple videos
+- [x] **Auto-download DeoVR mask** — bundle or download mask8k.png
 - [ ] **SBS split mode** — process left/right eyes independently for better quality
-- [ ] **Audio preservation** — ensure audio track carries through all steps
-- [ ] **Preview scrubber** — seek to any frame for pre-processing preview
-- [ ] **Settings persistence** — remember last-used settings
+- [x] **Audio preservation** — ensure audio track carries through all steps
+- [x] **Preview scrubber** — frame scrubber with ETA/FPS display
+- [x] **Settings persistence** — remember last-used settings
+- [ ] **Drag & drop** — drop video files onto the window
+- [ ] **ETA per-batch** — overall batch ETA, not just per-file
 
 ## Research Notes
 

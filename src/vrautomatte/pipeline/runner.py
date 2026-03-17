@@ -11,6 +11,7 @@ Steps:
 import shutil
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -76,6 +77,9 @@ class PipelineProgress:
     total_frames: int = 0
     source_frame: np.ndarray | None = None
     matte_frame: np.ndarray | None = None
+    elapsed_sec: float = 0.0
+    eta_sec: float = 0.0
+    fps: float = 0.0
 
 
 class Pipeline:
@@ -91,6 +95,8 @@ class Pipeline:
         self.config = config
         self.on_progress = on_progress
         self._cancelled = False
+        self._start_time = 0.0
+        self._matte_start_time = 0.0
 
     def cancel(self) -> None:
         """Request cancellation of the running pipeline."""
@@ -99,6 +105,7 @@ class Pipeline:
     def _emit(self, progress: PipelineProgress) -> None:
         """Emit progress update if callback is set."""
         if self.on_progress:
+            progress.elapsed_sec = time.monotonic() - self._start_time
             self.on_progress(progress)
 
     def run(self) -> Path:
@@ -118,6 +125,7 @@ class Pipeline:
             )
 
         self._cancelled = False
+        self._start_time = time.monotonic()
         config = self.config
         input_path = Path(config.input_path)
         output_path = Path(config.output_path)
@@ -154,6 +162,7 @@ class Pipeline:
 
             # ── Stage 2: Generate mattes ──
             logger.info("Stage 2: Generating AI mattes...")
+            self._matte_start_time = time.monotonic()
             processor = RVMProcessor(
                 variant=config.model_variant,
                 downsample_ratio=config.downsample_ratio,
@@ -172,8 +181,13 @@ class Pipeline:
                 matte_img = Image.fromarray(matte_arr, mode="L")
                 matte_img.save(mattes_dir / frame_file.name)
 
-                # Emit progress with preview (every 10th frame to save CPU)
+                # Emit progress with preview and ETA
                 if i % 10 == 0 or i == total_frames - 1:
+                    elapsed = time.monotonic() - self._matte_start_time
+                    fps = (i + 1) / elapsed if elapsed > 0 else 0
+                    remaining = total_frames - (i + 1)
+                    eta = remaining / fps if fps > 0 else 0
+
                     self._emit(PipelineProgress(
                         stage="Generating mattes",
                         stage_num=2,
@@ -182,6 +196,8 @@ class Pipeline:
                         total_frames=total_frames,
                         source_frame=frame_arr,
                         matte_frame=matte_arr,
+                        eta_sec=eta,
+                        fps=fps,
                     ))
 
             del processor  # free GPU memory
@@ -203,11 +219,14 @@ class Pipeline:
             ], capture_output=True, check=True)
 
             if config.output_format == OutputFormat.MATTE_ONLY:
-                # Just copy the matte video to output
-                shutil.copy2(matte_video, output_path)
-                logger.info(f"Done! Matte video saved to: {output_path}")
+                # Copy matte and merge original audio into output
+                self._copy_with_audio(
+                    matte_video, input_path, output_path
+                )
+                logger.info(f"Done! Matte saved to: {output_path}")
                 self._emit(PipelineProgress(
-                    stage="Complete", stage_num=self._total_stages(),
+                    stage="Complete",
+                    stage_num=self._total_stages(),
                     total_stages=self._total_stages(),
                 ))
                 return output_path
@@ -252,13 +271,35 @@ class Pipeline:
                 config.codec, config.crf,
             )
 
-            logger.info(f"Done! Alpha-packed video saved to: {output_path}")
+            logger.info(f"Done! Alpha-packed video: {output_path}")
             self._emit(PipelineProgress(
                 stage="Complete",
                 stage_num=self._total_stages(),
                 total_stages=self._total_stages(),
             ))
             return output_path
+
+    def _copy_with_audio(self, video_path: Path,
+                         audio_source: Path, output_path: Path) -> None:
+        """Copy video and mux audio from the original source.
+
+        If the original has no audio track, just copies the video.
+        """
+        try:
+            # Try muxing audio from original
+            subprocess.run([
+                "ffmpeg", "-y",
+                "-i", str(video_path),
+                "-i", str(audio_source),
+                "-c:v", "copy", "-c:a", "aac",
+                "-map", "0:v:0", "-map", "1:a:0?",
+                "-shortest",
+                str(output_path),
+            ], capture_output=True, check=True)
+        except subprocess.CalledProcessError:
+            # No audio track — just copy video
+            logger.debug("No audio track found, copying video only")
+            shutil.copy2(video_path, output_path)
 
     def _total_stages(self) -> int:
         """Calculate total stages based on config."""
