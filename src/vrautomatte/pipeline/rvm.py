@@ -18,11 +18,13 @@ from vrautomatte.utils.gpu import get_device
 RVM_MODELS = {
     "mobilenetv3": (
         "https://github.com/PeterL1n/RobustVideoMatting/"
-        "releases/download/v1.0.0/rvm_mobilenetv3.pth"
+        "releases/download/v1.0.0/"
+        "rvm_mobilenetv3_fp32.torchscript"
     ),
     "resnet50": (
         "https://github.com/PeterL1n/RobustVideoMatting/"
-        "releases/download/v1.0.0/rvm_resnet50.pth"
+        "releases/download/v1.0.0/"
+        "rvm_resnet50_fp32.torchscript"
     ),
 }
 
@@ -49,8 +51,16 @@ def download_model(variant: str = "mobilenetv3") -> Path:
             f"Use: {list(RVM_MODELS)}"
         )
 
-    filename = f"rvm_{variant}.pth"
+    filename = f"rvm_{variant}_fp32.torchscript"
     model_path = _model_dir() / filename
+
+    # Clean up old .pth files (wrong format)
+    old_pth = _model_dir() / f"rvm_{variant}.pth"
+    if old_pth.exists():
+        logger.info(
+            f"Removing incompatible .pth file: {old_pth}"
+        )
+        old_pth.unlink()
 
     if model_path.exists():
         logger.debug(f"RVM model cached: {model_path}")
