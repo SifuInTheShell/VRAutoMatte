@@ -140,6 +140,12 @@ def create_processor(
     downsample_ratio: float = 0.25,
     first_frame: np.ndarray | None = None,
     pov_mode: bool = False,
+    *,
+    use_fp16: bool = True,
+    max_internal_size: int = 480,
+    max_mem_frames: int = 3,
+    use_long_term: bool = True,
+    compile_model: bool = False,
 ) -> MatteProcessor:
     """Create a matting processor for the given variant.
 
@@ -152,6 +158,12 @@ def create_processor(
         downsample_ratio: RVM downscale (ignored for MA2).
         first_frame: First video frame (required for matanyone2).
         pov_mode: If True, select non-POV person mask.
+        use_fp16: MatAnyone2 only — FP16 weights + activations.
+        max_internal_size: MatAnyone2 only — memory encoding
+            resolution (px short side). 480 recommended for 4K+.
+        max_mem_frames: MatAnyone2 only — working-memory slots.
+        use_long_term: MatAnyone2 only — XMem long-term memory.
+        compile_model: MatAnyone2 only — torch.compile opt-in.
 
     Returns:
         A MatteProcessor instance.
@@ -211,6 +223,11 @@ def create_processor(
             first_frame_mask=mask,
             device=device,
             pov_mode=pov_mode,
+            use_fp16=use_fp16,
+            max_internal_size=max_internal_size,
+            max_mem_frames=max_mem_frames,
+            use_long_term=use_long_term,
+            compile_model=compile_model,
         )
 
     raise ValueError(
