@@ -5,7 +5,7 @@ import sys
 from loguru import logger
 from PySide6.QtWidgets import QApplication
 
-from vrautomatte.ui.main_window import DARK_STYLE, MainWindow
+from vrautomatte.ui.main_window import MainWindow
 
 
 def main():
@@ -22,8 +22,8 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName("VRAutoMatte")
     app.setStyle("Fusion")
-    app.setStyleSheet(DARK_STYLE)
 
+    # Theme is applied by MainWindow.__init__ via _apply_theme()
     window = MainWindow()
     window.show()
 

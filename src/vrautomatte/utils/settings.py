@@ -18,6 +18,7 @@ _DEFAULTS = {
     "codec": 0,                  # 0=HEVC, 1=H.264
     "is_sbs": False,             # SBS per-eye processing
     "pov_mode": False,           # Remove POV body
+    "dark_theme": False,         # Light theme by default
     "last_input_dir": "",
     "last_output_dir": "",
     "window_width": 900,

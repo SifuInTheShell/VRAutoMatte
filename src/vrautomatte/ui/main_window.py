@@ -8,6 +8,7 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QCheckBox,
     QComboBox,
     QFileDialog,
     QGroupBox,
@@ -34,6 +35,12 @@ from vrautomatte.pipeline.runner import (
     ProjectionType,
 )
 from vrautomatte.ui.preview import PreviewWidget
+from vrautomatte.ui.themes import (
+    DARK_COLORS,
+    DARK_STYLE,
+    LIGHT_COLORS,
+    LIGHT_STYLE,
+)
 from vrautomatte.ui.worker import PipelineWorker
 from vrautomatte.utils.ffmpeg import check_ffmpeg, get_video_info
 from vrautomatte.utils.gpu import get_device_info
@@ -41,336 +48,7 @@ from vrautomatte.utils.masks import ensure_mask, get_mask_path
 from vrautomatte.utils.settings import load_settings, save_settings
 
 
-DARK_STYLE = """
-/* ── Base ── */
-QMainWindow, QWidget {
-    background-color: #e8eaef;
-    color: #2a2c38;
-    font-family: 'Segoe UI Variable', 'Segoe UI', system-ui;
-    font-size: 13px;
-}
 
-/* ── Group Boxes ── */
-QGroupBox {
-    background-color: #f2f3f6;
-    border: 1px solid #d0d2da;
-    border-radius: 10px;
-    margin-top: 14px;
-    padding: 20px 14px 14px 14px;
-    font-weight: 600;
-    font-size: 12px;
-    letter-spacing: 0.5px;
-    text-transform: uppercase;
-    color: #4a7888;
-}
-QGroupBox::title {
-    subcontrol-origin: margin;
-    left: 16px;
-    padding: 0 8px;
-    color: #4a7888;
-}
-
-/* ── Text Inputs ── */
-QLineEdit {
-    background-color: #ffffff;
-    border: 1px solid #c8cad4;
-    border-radius: 6px;
-    padding: 8px 12px;
-    color: #2a2c38;
-    font-size: 13px;
-    selection-background-color: #80c8d8;
-}
-QLineEdit:focus {
-    border-color: #40a0b8;
-    background-color: #ffffff;
-}
-QLineEdit[readOnly="true"] {
-    color: #606878;
-    background-color: #f0f1f4;
-}
-
-/* ── Buttons ── */
-QPushButton {
-    background-color: #ffffff;
-    border: 1px solid #c0c4d0;
-    border-radius: 6px;
-    padding: 7px 18px;
-    color: #3a3e50;
-    font-weight: 600;
-    font-size: 12px;
-    letter-spacing: 0.3px;
-}
-QPushButton:hover {
-    background-color: #f0f4fa;
-    border-color: #60a0b0;
-    color: #2a2e40;
-}
-QPushButton:pressed {
-    background-color: #e4e8f0;
-    border-color: #40a0b8;
-}
-QPushButton:disabled {
-    background-color: #ecedf0;
-    color: #a0a4b0;
-    border-color: #d8dae0;
-}
-
-/* Start Button — teal */
-QPushButton#startButton {
-    background: qlineargradient(
-        x1:0, y1:0, x2:1, y2:1,
-        stop:0 #2a8888, stop:1 #2a9898
-    );
-    border: 1px solid #30a0a0;
-    border-radius: 8px;
-    color: #ffffff;
-    font-size: 14px;
-    font-weight: 700;
-    padding: 10px 28px;
-    letter-spacing: 0.5px;
-}
-QPushButton#startButton:hover {
-    background: qlineargradient(
-        x1:0, y1:0, x2:1, y2:1,
-        stop:0 #32a0a0, stop:1 #32b0b0
-    );
-    border-color: #40b8b8;
-}
-QPushButton#startButton:pressed {
-    background-color: #248080;
-}
-QPushButton#startButton:disabled {
-    background-color: #b0c8c8;
-    border-color: #a0b8b8;
-    color: #e0e8e8;
-}
-
-/* Cancel Button — warm red */
-QPushButton#cancelButton {
-    background: qlineargradient(
-        x1:0, y1:0, x2:1, y2:1,
-        stop:0 #c05050, stop:1 #d06060
-    );
-    border: 1px solid #c06060;
-    color: #ffffff;
-    font-weight: 600;
-}
-QPushButton#cancelButton:hover {
-    background-color: #d06868;
-    border-color: #e07070;
-}
-
-/* + Queue button — subtle outline */
-QPushButton#addBatchButton {
-    background-color: transparent;
-    border: 1px dashed #90a0b0;
-    color: #4a8898;
-    padding: 7px 14px;
-}
-QPushButton#addBatchButton:hover {
-    border-color: #40a0b8;
-    color: #2a7888;
-    background-color: #f0f8fa;
-}
-
-/* ── Combo Boxes ── */
-QComboBox {
-    background-color: #ffffff;
-    border: 1px solid #c8cad4;
-    border-radius: 6px;
-    padding: 6px 10px;
-    color: #2a2c38;
-    font-size: 12px;
-    min-width: 100px;
-}
-QComboBox:hover {
-    border-color: #60a0b0;
-}
-QComboBox::drop-down {
-    border: none;
-    width: 24px;
-    subcontrol-position: right center;
-}
-QComboBox::down-arrow {
-    image: none;
-    border-left: 4px solid transparent;
-    border-right: 4px solid transparent;
-    border-top: 5px solid #8090a0;
-    margin-right: 8px;
-}
-QComboBox QAbstractItemView {
-    background-color: #ffffff;
-    border: 1px solid #c0c4d0;
-    border-radius: 4px;
-    color: #2a2c38;
-    selection-background-color: #d0eef4;
-    selection-color: #1a5868;
-    padding: 4px;
-    outline: 0;
-}
-
-/* ── Check Boxes ── */
-QCheckBox {
-    spacing: 8px;
-    color: #3a3e50;
-    font-size: 12px;
-}
-QCheckBox::indicator {
-    width: 16px;
-    height: 16px;
-    border: 2px solid #a0a8b8;
-    border-radius: 4px;
-    background-color: #ffffff;
-}
-QCheckBox::indicator:hover {
-    border-color: #50a0b0;
-}
-QCheckBox::indicator:checked {
-    background-color: #2a9090;
-    border-color: #30a8a8;
-    image: none;
-}
-QCheckBox::indicator:checked:hover {
-    background-color: #32a0a0;
-}
-
-/* ── Sliders ── */
-QSlider::groove:horizontal {
-    border: none;
-    height: 4px;
-    background: #d0d4de;
-    border-radius: 2px;
-}
-QSlider::handle:horizontal {
-    background: qradialgradient(
-        cx:0.5, cy:0.5, radius:0.5,
-        fx:0.5, fy:0.5,
-        stop:0 #50c8c8, stop:0.7 #30a0a8, stop:1 #2888a0
-    );
-    border: none;
-    width: 16px;
-    height: 16px;
-    margin: -6px 0;
-    border-radius: 8px;
-}
-QSlider::handle:horizontal:hover {
-    background: qradialgradient(
-        cx:0.5, cy:0.5, radius:0.5,
-        fx:0.5, fy:0.5,
-        stop:0 #70e8e8, stop:0.7 #40b0b8, stop:1 #3098a8
-    );
-}
-QSlider::sub-page:horizontal {
-    background: qlineargradient(
-        x1:0, y1:0, x2:1, y2:0,
-        stop:0 #2a9090, stop:1 #38a8b0
-    );
-    border-radius: 2px;
-}
-
-/* ── Progress Bar ── */
-QProgressBar {
-    border: 1px solid #c8cad4;
-    border-radius: 6px;
-    text-align: center;
-    background-color: #ffffff;
-    color: #2a7888;
-    height: 24px;
-    font-size: 11px;
-    font-weight: 600;
-}
-QProgressBar::chunk {
-    background: qlineargradient(
-        x1:0, y1:0, x2:1, y2:0,
-        stop:0 #2a8888, stop:0.5 #38a8a8, stop:1 #2a9090
-    );
-    border-radius: 5px;
-}
-
-/* ── Labels ── */
-QLabel {
-    color: #505868;
-    font-size: 12px;
-}
-QLabel#statusLabel {
-    color: #6a7888;
-    font-size: 12px;
-    font-weight: 500;
-}
-QLabel#deviceLabel {
-    color: #4a7888;
-    font-size: 11px;
-    font-style: italic;
-}
-
-/* ── List Widget (Batch Queue) ── */
-QListWidget {
-    background-color: #ffffff;
-    border: 1px solid #c8cad4;
-    border-radius: 6px;
-    color: #3a3e50;
-    font-size: 12px;
-    outline: 0;
-}
-QListWidget::item {
-    padding: 6px 10px;
-    border-bottom: 1px solid #ecedf0;
-}
-QListWidget::item:selected {
-    background-color: #d8f0f4;
-    color: #1a5868;
-}
-QListWidget::item:hover {
-    background-color: #f0f6f8;
-}
-
-/* ── Splitter ── */
-QSplitter::handle {
-    background-color: #d0d4de;
-    width: 2px;
-}
-
-/* ── Scroll Bar ── */
-QScrollBar:vertical {
-    background: #f0f1f4;
-    width: 8px;
-    border: none;
-    border-radius: 4px;
-}
-QScrollBar::handle:vertical {
-    background: #c0c4d0;
-    border-radius: 4px;
-    min-height: 30px;
-}
-QScrollBar::handle:vertical:hover {
-    background: #a0a8b8;
-}
-QScrollBar::add-line:vertical,
-QScrollBar::sub-line:vertical {
-    height: 0;
-}
-QScrollBar:horizontal {
-    background: #f0f1f4;
-    height: 8px;
-    border: none;
-    border-radius: 4px;
-}
-QScrollBar::handle:horizontal {
-    background: #c0c4d0;
-    border-radius: 4px;
-    min-width: 30px;
-}
-
-/* ── Tooltips ── */
-QToolTip {
-    background-color: #2a3040;
-    color: #f0f0f8;
-    border: 1px solid #4a5868;
-    border-radius: 4px;
-    padding: 6px 10px;
-    font-size: 12px;
-}
-"""
 
 
 class MainWindow(QMainWindow):
@@ -393,9 +71,12 @@ class MainWindow(QMainWindow):
         self._batch_index = 0
         self._settings = load_settings()
         self._video_info: dict | None = None
+        self._is_dark = self._settings.get("dark_theme", False)
+        self._colors = DARK_COLORS if self._is_dark else LIGHT_COLORS
         self._setup_ui()
         self._restore_settings()
         self._update_device_label()
+        self._apply_theme()
         self.setAcceptDrops(True)
 
     def _setup_ui(self):
@@ -445,10 +126,6 @@ class MainWindow(QMainWindow):
 
         # Video info
         self.info_label = QLabel("")
-        self.info_label.setStyleSheet(
-            "color: #5a8898; font-size: 11px; "
-            "font-family: 'Cascadia Code', 'Consolas', monospace;"
-        )
         io_layout.addWidget(self.info_label)
 
         root.addWidget(io_group)
@@ -538,7 +215,6 @@ class MainWindow(QMainWindow):
 
         # Row 4: SBS stereo
         sbs_row = QHBoxLayout()
-        from PySide6.QtWidgets import QCheckBox
         self.sbs_check = QCheckBox(
             "SBS Stereo (per-eye matting)"
         )
@@ -548,9 +224,6 @@ class MainWindow(QMainWindow):
         )
         sbs_row.addWidget(self.sbs_check)
         self.sbs_auto_label = QLabel("")
-        self.sbs_auto_label.setStyleSheet(
-            "color: #2a8878; font-size: 10px; font-style: italic;"
-        )
         sbs_row.addWidget(self.sbs_auto_label)
         sbs_row.addSpacing(20)
         self.pov_check = QCheckBox("POV Mode")
@@ -565,10 +238,6 @@ class MainWindow(QMainWindow):
         )
         sbs_row.addWidget(self.pov_check)
         self.pov_warning = QLabel("")
-        self.pov_warning.setStyleSheet(
-            "color: #b08030; font-size: 10px; "
-            "font-style: italic;"
-        )
         sbs_row.addWidget(self.pov_warning)
         sbs_row.addStretch()
         settings_layout.addLayout(sbs_row)
@@ -644,6 +313,12 @@ class MainWindow(QMainWindow):
         self.device_label = QLabel("")
         self.device_label.setObjectName("deviceLabel")
         status_row.addWidget(self.device_label)
+        status_row.addSpacing(8)
+        self.theme_btn = QPushButton("🌙")
+        self.theme_btn.setObjectName("themeToggle")
+        self.theme_btn.setToolTip("Toggle light / dark theme")
+        self.theme_btn.clicked.connect(self._toggle_theme)
+        status_row.addWidget(self.theme_btn)
         root.addLayout(status_row)
 
     # ── Settings Persistence ──
@@ -683,6 +358,7 @@ class MainWindow(QMainWindow):
             "codec": self.codec_combo.currentIndex(),
             "is_sbs": self.sbs_check.isChecked(),
             "pov_mode": self.pov_check.isChecked(),
+            "dark_theme": self._is_dark,
             "window_width": self.width(),
             "window_height": self.height(),
         })
@@ -944,8 +620,46 @@ class MainWindow(QMainWindow):
     def _update_fov_label(self, value: int):
         self.fov_label.setText(f"{value}°")
 
+    def _toggle_theme(self):
+        """Switch between light and dark themes."""
+        self._is_dark = not self._is_dark
+        self._colors = (
+            DARK_COLORS if self._is_dark else LIGHT_COLORS
+        )
+        self._apply_theme()
+        self._update_pov_warning()
+        self._update_device_label()
+        self._settings["dark_theme"] = self._is_dark
+
+    def _apply_theme(self):
+        """Apply the current theme stylesheet and colors."""
+        style = DARK_STYLE if self._is_dark else LIGHT_STYLE
+        QApplication.instance().setStyleSheet(style)
+        self.theme_btn.setText(
+            "☀️" if self._is_dark else "🌙"
+        )
+        c = self._colors
+        mono = (
+            "font-family: 'Cascadia Code', "
+            "'Consolas', monospace;"
+        )
+        self.info_label.setStyleSheet(
+            f"color: {c['info_label']}; font-size: 11px; "
+            f"{mono}"
+        )
+        self.sbs_auto_label.setStyleSheet(
+            f"color: {c['sbs_auto']}; font-size: 10px; "
+            f"font-style: italic;"
+        )
+        self.pov_warning.setStyleSheet(
+            f"color: {c['pov_warning_default']}; "
+            f"font-size: 10px; font-style: italic;"
+        )
+        self.preview.apply_colors(c)
+
     def _update_pov_warning(self, *_args):
         """Show info about POV quality per model."""
+        c = self._colors
         if not self.pov_check.isChecked():
             self.pov_warning.setText("")
         elif self.model_combo.currentIndex() == 2:
@@ -953,20 +667,21 @@ class MainWindow(QMainWindow):
                 "✓ Best quality (instance matting)"
             )
             self.pov_warning.setStyleSheet(
-                "color: #2a8868; font-size: 10px; "
-                "font-style: italic;"
+                f"color: {c['pov_quality']}; font-size: 10px; "
+                f"font-style: italic;"
             )
         else:
             self.pov_warning.setText(
                 "⚡ Fast mode (static mask subtraction)"
             )
             self.pov_warning.setStyleSheet(
-                "color: #b08030; font-size: 10px; "
-                "font-style: italic;"
+                f"color: {c['pov_fast']}; font-size: 10px; "
+                f"font-style: italic;"
             )
 
     def _update_device_label(self):
         """Update device info label, warn if CPU-only."""
+        c = self._colors
         try:
             info = get_device_info()
             text = f"Device: {info['name']}"
@@ -976,7 +691,8 @@ class MainWindow(QMainWindow):
 
             if info["device"] == "cpu":
                 self.device_label.setStyleSheet(
-                    "color: #b08030; font-size: 11px;"
+                    f"color: {c['device_cpu_warn']}; "
+                    f"font-size: 11px;"
                 )
                 self.device_label.setText(
                     "⚠️ CPU mode — processing will be slower"
