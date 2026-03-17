@@ -36,6 +36,11 @@ from vrautomatte.utils.sbs import (
     split_frame,
 )
 
+# Minimum free space to keep on the drive (1 GB).
+_MIN_FREE_BYTES = 1_073_741_824
+# How often to check disk during matting (every N frames).
+_DISK_CHECK_INTERVAL = 50
+
 
 class OutputFormat(str, Enum):
     """Output format options."""
@@ -157,6 +162,28 @@ class Pipeline:
             mattes_dir = tmp / "mattes"
             frames_dir.mkdir()
             mattes_dir.mkdir()
+
+            # ── Pre-flight disk space check ──
+            num_to_process = info["num_frames"]
+            if config.start_frame > 0 or config.end_frame > 0:
+                s = max(config.start_frame, 1)
+                e = config.end_frame or info["num_frames"]
+                num_to_process = min(
+                    e, info["num_frames"]
+                ) - s + 1
+            estimated = self._estimate_disk_bytes(
+                info["width"], info["height"],
+                num_to_process,
+                is_deovr=(
+                    config.output_format
+                    == OutputFormat.DEOVR_ALPHA
+                ),
+            )
+            self._check_disk_space(tmp, estimated)
+            est_gb = estimated / (1024 ** 3)
+            logger.info(
+                f"Estimated temp space: {est_gb:.1f} GB"
+            )
 
             # ── Stage 1: Extract frames ──
             self._emit(PipelineProgress(
@@ -337,6 +364,10 @@ class Pipeline:
                     "Pipeline cancelled by user"
                 )
 
+            # Periodic disk space check
+            if i % _DISK_CHECK_INTERVAL == 0:
+                self._check_disk_free(mattes_dir)
+
             frame_img = Image.open(
                 frame_file
             ).convert("RGB")
@@ -393,6 +424,8 @@ class Pipeline:
                 raise InterruptedError(
                     "Pipeline cancelled by user"
                 )
+            if i % _DISK_CHECK_INTERVAL == 0:
+                self._check_disk_free(mattes_dir)
             left_mattes.append(proc_l.process_frame(lf))
             self._emit_matte_progress(
                 i, total_frames * 2,
@@ -420,6 +453,8 @@ class Pipeline:
                 raise InterruptedError(
                     "Pipeline cancelled by user"
                 )
+            if i % _DISK_CHECK_INTERVAL == 0:
+                self._check_disk_free(mattes_dir)
             right_mattes.append(proc_r.process_frame(rf))
             self._emit_matte_progress(
                 total_frames + i, total_frames * 2,
@@ -485,3 +520,79 @@ class Pipeline:
         if self.config.output_format == OutputFormat.MATTE_ONLY:
             return 3  # extract, matte, assemble
         return 6  # + fisheye convert, red channel, pack
+
+    @staticmethod
+    def _estimate_disk_bytes(
+        width: int, height: int, num_frames: int,
+        is_deovr: bool = False,
+    ) -> int:
+        """Estimate required temp disk space in bytes.
+
+        PNG frames ≈ width × height × 3 × 0.5 (compression).
+        We store source frames + matte frames + intermediate
+        videos, so roughly 3× the frame data.
+
+        Args:
+            width: Video width.
+            height: Video height.
+            num_frames: Number of frames to process.
+            is_deovr: DeoVR pipeline creates extra intermediates.
+
+        Returns:
+            Estimated bytes needed.
+        """
+        bytes_per_frame = int(width * height * 3 * 0.5)
+        # source PNGs + matte PNGs
+        frame_bytes = bytes_per_frame * num_frames * 2
+        # intermediate video files (~10% of uncompressed)
+        video_overhead = int(
+            width * height * 3 * num_frames * 0.1
+        )
+        multiplier = 2 if is_deovr else 1
+        return frame_bytes + (video_overhead * multiplier)
+
+    @staticmethod
+    def _check_disk_space(path: Path, required: int) -> None:
+        """Raise if the drive has less than required + safety margin.
+
+        Args:
+            path: Any path on the target drive.
+            required: Estimated bytes needed for the operation.
+
+        Raises:
+            RuntimeError: If insufficient disk space.
+        """
+        free = shutil.disk_usage(path).free
+        needed = required + _MIN_FREE_BYTES
+        if free < needed:
+            free_gb = free / (1024 ** 3)
+            need_gb = needed / (1024 ** 3)
+            raise RuntimeError(
+                f"Not enough disk space. "
+                f"Available: {free_gb:.1f} GB, "
+                f"estimated need: {need_gb:.1f} GB "
+                f"(including 1 GB safety margin). "
+                f"Free up space or reduce frame range."
+            )
+
+    @staticmethod
+    def _check_disk_free(path: Path) -> None:
+        """Raise if free space drops below the safety margin.
+
+        Called periodically during processing to prevent
+        filling the drive.
+
+        Args:
+            path: Any path on the target drive.
+
+        Raises:
+            RuntimeError: If free space is critically low.
+        """
+        free = shutil.disk_usage(path).free
+        if free < _MIN_FREE_BYTES:
+            free_mb = free / (1024 ** 2)
+            raise RuntimeError(
+                f"Disk space critically low ({free_mb:.0f} MB "
+                f"remaining). Processing stopped to prevent "
+                f"filling the drive. Free up space and retry."
+            )

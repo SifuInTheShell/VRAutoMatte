@@ -111,3 +111,68 @@ class TestCreateProcessorMatAnyone2(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestDiskSpaceChecks(unittest.TestCase):
+    """Tests for pipeline disk space estimation and checks."""
+
+    def test_estimate_returns_positive(self):
+        """Estimate is positive for any valid input."""
+        from vrautomatte.pipeline.runner import Pipeline
+        est = Pipeline._estimate_disk_bytes(1920, 1080, 100)
+        self.assertGreater(est, 0)
+
+    def test_estimate_deovr_larger(self):
+        """DeoVR estimate is larger than matte-only."""
+        from vrautomatte.pipeline.runner import Pipeline
+        base = Pipeline._estimate_disk_bytes(
+            1920, 1080, 100, is_deovr=False
+        )
+        deovr = Pipeline._estimate_disk_bytes(
+            1920, 1080, 100, is_deovr=True
+        )
+        self.assertGreater(deovr, base)
+
+    def test_estimate_scales_with_frames(self):
+        """More frames = more space needed."""
+        from vrautomatte.pipeline.runner import Pipeline
+        small = Pipeline._estimate_disk_bytes(
+            1920, 1080, 100
+        )
+        large = Pipeline._estimate_disk_bytes(
+            1920, 1080, 1000
+        )
+        self.assertGreater(large, small)
+
+    def test_check_disk_space_passes_with_plenty(self):
+        """No error when plenty of space available."""
+        import tempfile
+        from pathlib import Path
+        from vrautomatte.pipeline.runner import Pipeline
+        # Temp dir should have plenty of space
+        with tempfile.TemporaryDirectory() as tmp:
+            Pipeline._check_disk_space(
+                Path(tmp), 1024
+            )  # Should not raise
+
+    def test_check_disk_space_fails_on_impossible(self):
+        """Error when requesting more than exists."""
+        import tempfile
+        from pathlib import Path
+        from vrautomatte.pipeline.runner import Pipeline
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(RuntimeError) as ctx:
+                Pipeline._check_disk_space(
+                    Path(tmp), 999_999_999_999_999
+                )
+            self.assertIn("Not enough disk space", str(ctx.exception))
+
+    def test_check_disk_free_passes_normally(self):
+        """No error when drive isn't full."""
+        import tempfile
+        from pathlib import Path
+        from vrautomatte.pipeline.runner import Pipeline
+        with tempfile.TemporaryDirectory() as tmp:
+            Pipeline._check_disk_free(
+                Path(tmp)
+            )  # Should not raise
