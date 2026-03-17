@@ -55,13 +55,13 @@ This milestone is complete only when all are true:
 - [x] **S01: MatAnyone 2 + SAM2 Integration** `risk:high` `depends:[]`
   > After this: user selects "MatAnyone 2" from model dropdown, hits Start, video is auto-matted with higher edge quality than RVM — works on both GPU and CPU
 
-- [ ] **S02: SBS Stereo Per-Eye Processing** `risk:medium` `depends:[]`
+- [x] **S02: SBS Stereo Per-Eye Processing** `risk:medium` `depends:[]`
   > After this: user loads an SBS stereo VR video, SBS is auto-detected, matting runs per-eye independently, output is correct stereo — works with both RVM and MatAnyone 2
 
-- [ ] **S03: Preview Scrubber Seek** `risk:low` `depends:[]`
+- [x] **S03: Preview Scrubber Seek** `risk:low` `depends:[]`
   > After this: user drags the preview scrubber before or during processing, source frame at that position appears instantly in the preview pane
 
-- [ ] **S04: Drag & Drop File Input** `risk:low` `depends:[]`
+- [x] **S04: Drag & Drop File Input** `risk:low` `depends:[]`
   > After this: user drags one video file onto the window and it becomes the input; drags multiple files and they all go into the batch queue
 
 ## Boundary Map
