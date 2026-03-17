@@ -207,6 +207,7 @@ class MainWindow(QMainWindow):
         self._setup_ui()
         self._restore_settings()
         self._update_device_label()
+        self.setAcceptDrops(True)
 
     def _setup_ui(self):
         central = QWidget()
@@ -476,6 +477,60 @@ class MainWindow(QMainWindow):
         self._save_current_settings()
         super().closeEvent(event)
 
+    # ── Drag & Drop ──
+
+    _VIDEO_EXTENSIONS = {
+        ".mp4", ".mkv", ".mov", ".avi", ".webm", ".wmv",
+    }
+
+    def dragEnterEvent(self, event):
+        """Accept drag if it contains video file URLs."""
+        if event.mimeData().hasUrls():
+            urls = event.mimeData().urls()
+            has_video = any(
+                Path(u.toLocalFile()).suffix.lower()
+                in self._VIDEO_EXTENSIONS
+                for u in urls if u.isLocalFile()
+            )
+            if has_video:
+                event.acceptProposedAction()
+                return
+        event.ignore()
+
+    def dropEvent(self, event):
+        """Handle dropped files: single → input, multiple → batch."""
+        urls = event.mimeData().urls()
+        video_paths = [
+            u.toLocalFile() for u in urls
+            if u.isLocalFile()
+            and Path(u.toLocalFile()).suffix.lower()
+            in self._VIDEO_EXTENSIONS
+        ]
+
+        if not video_paths:
+            return
+
+        if len(video_paths) == 1:
+            # Single file → set as current input
+            path = video_paths[0]
+            self.input_edit.setText(path)
+            self._settings["last_input_dir"] = str(
+                Path(path).parent
+            )
+            self._auto_output_name(path)
+            self._show_video_info(path)
+            logger.info(f"Dropped input: {path}")
+        else:
+            # Multiple files → add all to batch queue
+            for path in video_paths:
+                self._add_file_to_batch(path)
+            logger.info(
+                f"Dropped {len(video_paths)} files "
+                "into batch queue"
+            )
+
+        event.acceptProposedAction()
+
     # ── Batch Queue ──
 
     def _add_to_batch(self):
@@ -507,6 +562,32 @@ class MainWindow(QMainWindow):
         # Clear input for next file
         self.input_edit.clear()
         self.output_edit.clear()
+
+    def _add_file_to_batch(self, input_path: str):
+        """Add a file to the batch queue with auto output name.
+
+        Args:
+            input_path: Path to the video file.
+        """
+        p = Path(input_path)
+        stem = p.stem
+        suffix = p.suffix
+        output_path = str(
+            p.parent / f"{stem}_matte{suffix}"
+        )
+
+        entry = {
+            "input": input_path,
+            "output": output_path,
+        }
+        self._batch_queue.append(entry)
+
+        item = QListWidgetItem(
+            f"{p.name}  →  {Path(output_path).name}"
+        )
+        self.batch_list.addItem(item)
+        self._update_batch_header()
+        self.batch_group.setVisible(True)
         self.info_label.clear()
 
     def _remove_from_batch(self):
