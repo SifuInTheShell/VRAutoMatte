@@ -1,21 +1,17 @@
-# OS
+# ── OS ──
 .DS_Store
 Thumbs.db
 Desktop.ini
 
-# Editor / IDE
+# ── Editor / IDE ──
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
+*.code-workspace
 
-# Environment
-.env
-.env.local
-.env.*.local
-
-# Python (if used)
+# ── Python ──
 __pycache__/
 *.py[cod]
 *$py.class
@@ -25,26 +21,14 @@ build/
 .venv/
 venv/
 .eggs/
+*.pyc
 
-# Node (if used)
-node_modules/
-npm-debug.log*
+# ── Environment ──
+.env
+.env.*
+!.env.example
 
-# Unity (if used)
-Library/
-Temp/
-Obj/
-Logs/
-UserSettings/
-
-# Build artifacts
-*.o
-*.so
-*.dylib
-*.dll
-*.exe
-
-# Data / models (large files)
+# ── Data / Models (large files) ──
 *.onnx
 *.pt
 *.pth
@@ -54,31 +38,21 @@ data/
 models/
 outputs/
 
-# Agent internals
-.bg-shell/
-
-# ── GSD baseline (auto-generated) ──
-.gsd/activity/
-.gsd/forensics/
-.gsd/runtime/
-.gsd/worktrees/
-.gsd/parallel/
-.gsd/auto.lock
-.gsd/metrics.json
-.gsd/completed-units.json
-.gsd/STATE.md
-.gsd/gsd.db
-.gsd/DISCUSSION-MANIFEST.json
-.gsd/milestones/**/*-CONTINUE.md
-.gsd/milestones/**/continue.md
-*.code-workspace
-.env.*
-!.env.example
-.next/
-*.pyc
-target/
-vendor/
+# ── Build / Runtime ──
+*.o
+*.so
+*.dylib
+*.dll
+*.exe
 *.log
-coverage/
 .cache/
 tmp/
+coverage/
+target/
+
+# ── GSD (agent internals) ──
+.gsd/
+.bg-shell/
+
+# ── CLAUDE.md (project-specific agent instructions) ──
+CLAUDE.md
