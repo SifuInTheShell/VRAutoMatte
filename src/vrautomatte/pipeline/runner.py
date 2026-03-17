@@ -75,6 +75,10 @@ class PipelineConfig:
     # POV mode
     pov_mode: bool = False               # Remove POV body + background
 
+    # Frame range (1-based, inclusive). 0 = unset (use all).
+    start_frame: int = 0
+    end_frame: int = 0
+
 
 @dataclass
 class PipelineProgress:
@@ -160,10 +164,37 @@ class Pipeline:
                 total_stages=self._total_stages(),
             ))
             logger.info("Stage 1: Extracting frames...")
-            subprocess.run([
-                "ffmpeg", "-y", "-i", str(input_path),
-                str(frames_dir / "frame_%06d.png"),
-            ], capture_output=True, check=True)
+
+            # Build ffmpeg extract command with optional range
+            extract_cmd = ["ffmpeg", "-y", "-i", str(input_path)]
+            has_range = (
+                config.start_frame > 0 or config.end_frame > 0
+            )
+            if has_range:
+                start = max(config.start_frame - 1, 0)
+                end = (
+                    config.end_frame
+                    if config.end_frame > 0
+                    else info["num_frames"]
+                )
+                end = min(end, info["num_frames"])
+                count = end - start
+                # Select frame range via video filter
+                extract_cmd += [
+                    "-vf",
+                    f"select='between(n\\,{start}\\,{end - 1})'",
+                    "-vsync", "vfr",
+                ]
+                logger.info(
+                    f"Frame range: {start + 1}–{end} "
+                    f"({count} frames)"
+                )
+            extract_cmd.append(
+                str(frames_dir / "frame_%06d.png")
+            )
+            subprocess.run(
+                extract_cmd, capture_output=True, check=True,
+            )
 
             frame_files = sorted(frames_dir.glob("*.png"))
             total_frames = len(frame_files)
