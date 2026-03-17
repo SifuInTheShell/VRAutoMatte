@@ -53,6 +53,3 @@ target/
 # ── GSD (agent internals) ──
 .gsd/
 .bg-shell/
-
-# ── CLAUDE.md (project-specific agent instructions) ──
-CLAUDE.md
