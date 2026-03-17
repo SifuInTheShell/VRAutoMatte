@@ -88,6 +88,36 @@ class PipelineConfig:
     # Custom temp directory (empty = system default).
     temp_dir: str = ""
 
+    # ── MatAnyone 2 performance settings ──────────────────────────
+    # These only apply when model_variant == "matanyone2".
+
+    # Run model in FP16. Halves VRAM usage on CUDA. Default True.
+    use_fp16: bool = True
+
+    # Memory-bank encoding resolution (px, short side).
+    # Reduces working-memory VRAM by ~95% at 480 vs full 4K.
+    # -1 = full resolution. Default 480.
+    ma2_internal_size: int = 480
+
+    # Working-memory frame slots before long-term consolidation.
+    # Lower = less VRAM, marginally less temporal smoothing.
+    ma2_mem_frames: int = 3
+
+    # XMem long-term memory potentiation. Required for videos
+    # longer than a few minutes — prevents unbounded VRAM growth.
+    ma2_use_long_term: bool = True
+
+    # torch.compile with CUDA-graph-replay. Opt-in: adds ~30 s
+    # first-frame compilation cost, saves ~15-30% per frame after.
+    ma2_compile_model: bool = False
+
+    # ── Disk management ───────────────────────────────────────────
+    # Matte frames to accumulate before encoding a segment video and
+    # deleting the PNGs. Caps the matte-PNG pool at chunk_size × PNG.
+    # At 8K (5800×2900), each matte PNG ≈ 8 MB → 500 ≈ 4 GB peak.
+    # Source PNGs are deleted immediately after processing regardless.
+    chunk_size: int = 500
+
 
 @dataclass
 class PipelineProgress:
@@ -235,8 +265,10 @@ class Pipeline:
             tmp = Path(tmpdir)
             frames_dir = tmp / "frames"
             mattes_dir = tmp / "mattes"
+            segments_dir = tmp / "segments"
             frames_dir.mkdir()
             mattes_dir.mkdir()
+            segments_dir.mkdir()
 
             # ── Pre-flight disk space check ──
             num_to_process = info["num_frames"]
@@ -253,6 +285,7 @@ class Pipeline:
                     config.output_format
                     == OutputFormat.DEOVR_ALPHA
                 ),
+                chunk_size=config.chunk_size,
             )
             self._check_disk_space(tmp, estimated)
             est_gb = estimated / (1024 ** 3)
@@ -323,29 +356,28 @@ class Pipeline:
             if use_sbs:
                 self._run_sbs_matte_pass(
                     config, frame_files, mattes_dir,
-                    total_frames,
+                    segments_dir, total_frames, info["fps_str"],
                 )
             else:
                 self._run_matte_pass(
                     config, frame_files, mattes_dir,
-                    total_frames,
+                    segments_dir, total_frames, info["fps_str"],
                 )
 
-            # ── Stage 3: Reassemble matte video ──
-            logger.info("Stage 3: Assembling matte video...")
+            # ── Stage 3: Concatenate matte segments ──
+            # Segment videos were encoded (and matte PNGs deleted)
+            # during Stage 2. Source PNGs were also deleted per-frame.
+            # This concat is fast — no re-encode, stream copy only.
+            logger.info("Stage 3: Concatenating matte segments...")
             self._emit(PipelineProgress(
                 stage="Assembling matte video", stage_num=3,
                 total_stages=self._total_stages(),
             ))
             matte_video = tmp / "matte.mp4"
-            subprocess.run([
-                "ffmpeg", "-y",
-                "-framerate", info["fps_str"],
-                "-i", str(mattes_dir / "frame_%06d.png"),
-                "-c:v", "libx264", "-crf", str(config.crf),
-                "-pix_fmt", "yuv420p",
-                str(matte_video),
-            ], capture_output=True, check=True)
+            self._concat_matte_segments(
+                segments_dir, matte_video, info["fps_str"],
+                config.crf,
+            )
 
             if config.output_format == OutputFormat.MATTE_ONLY:
                 # Copy matte and merge original audio into output
@@ -408,155 +440,297 @@ class Pipeline:
             ))
             return output_path
 
-    def _make_processor(self, config, frame_files):
-        """Create a processor, handling mask gen if needed."""
-        first_frame = None
+    def _make_processor(self, config, first_frame: np.ndarray | None):
+        """Create a matting processor from config.
+
+        Args:
+            config: Pipeline configuration.
+            first_frame: First video frame as uint8 RGB array.
+                Required for matanyone2 and pov_mode; None otherwise.
+        """
         needs_first_frame = (
             config.model_variant == "matanyone2"
             or config.pov_mode
         )
-        if needs_first_frame:
+        if needs_first_frame and first_frame is not None:
             self._emit(PipelineProgress(
                 stage="Generating first-frame mask",
                 stage_num=2,
                 total_stages=self._total_stages(),
             ))
-            first_img = Image.open(
-                frame_files[0]
-            ).convert("RGB")
-            first_frame = np.array(first_img)
 
         return create_processor(
             variant=config.model_variant,
             downsample_ratio=config.downsample_ratio,
-            first_frame=first_frame,
+            first_frame=first_frame if needs_first_frame else None,
             pov_mode=config.pov_mode,
+            use_fp16=config.use_fp16,
+            max_internal_size=config.ma2_internal_size,
+            max_mem_frames=config.ma2_mem_frames,
+            use_long_term=config.ma2_use_long_term,
+            compile_model=config.ma2_compile_model,
         )
 
     def _run_matte_pass(
         self, config, frame_files, mattes_dir,
-        total_frames,
+        segments_dir, total_frames, fps_str,
     ):
-        """Run matting on all frames (non-SBS path)."""
-        processor = self._make_processor(
-            config, frame_files
+        """Run matting on all frames (non-SBS path).
+
+        Source PNGs are deleted immediately after each frame is
+        processed.  Matte PNGs are flushed to a segment video every
+        ``config.chunk_size`` frames, then deleted — keeping the
+        matte-PNG pool bounded regardless of video length.
+        """
+        first_frame = np.array(
+            Image.open(frame_files[0]).convert("RGB")
         )
+        processor = self._make_processor(config, first_frame)
+
+        seg_idx = 0          # segment video counter
+        seg_frame = 0        # frames written into current segment
 
         for i, frame_file in enumerate(frame_files):
             if self._cancelled:
+                processor.cleanup()
                 raise InterruptedError(
                     "Pipeline cancelled by user"
                 )
 
-            # Periodic disk space check
             if i % _DISK_CHECK_INTERVAL == 0:
                 self._check_disk_free(mattes_dir)
 
-            frame_img = Image.open(
-                frame_file
-            ).convert("RGB")
-            frame_arr = np.array(frame_img)
+            frame_arr = np.array(
+                Image.open(frame_file).convert("RGB")
+            )
             matte_arr = processor.process_frame(frame_arr)
 
-            matte_img = Image.fromarray(matte_arr, mode="L")
-            matte_img.save(mattes_dir / frame_file.name)
+            # Save matte PNG with a local (per-segment) index so
+            # ffmpeg's image2 demuxer sees a gapless sequence.
+            seg_frame += 1
+            Image.fromarray(matte_arr, mode="L").save(
+                mattes_dir / f"frame_{seg_frame:06d}.png"
+            )
+
+            # Delete source PNG immediately — no longer needed.
+            try:
+                frame_file.unlink()
+            except OSError:
+                pass
 
             self._emit_matte_progress(
                 i, total_frames, frame_arr, matte_arr
             )
 
+            # Flush segment when chunk is full or on the last frame.
+            if seg_frame >= config.chunk_size or i == total_frames - 1:
+                self._flush_matte_segment(
+                    mattes_dir, segments_dir, seg_idx,
+                    fps_str=fps_str,
+                    crf=config.crf,
+                )
+                seg_idx += 1
+                seg_frame = 0
+
         processor.cleanup()
 
     def _run_sbs_matte_pass(
         self, config, frame_files, mattes_dir,
-        total_frames,
+        segments_dir, total_frames, fps_str,
     ):
         """Run per-eye matting on SBS stereo frames.
 
-        Splits each frame, mattes left eye first (all frames),
-        then right eye (all frames), merges results.
-        """
-        logger.info("SBS mode: processing per-eye")
-        # Read all frames and split
-        left_frames = []
-        right_frames = []
-        for ff in frame_files:
-            img = np.array(
-                Image.open(ff).convert("RGB")
-            )
-            left, right = split_frame(img)
-            left_frames.append(left)
-            right_frames.append(right)
+        Processes both eyes together, one frame at a time:
 
-        # --- Left eye pass ---
-        logger.info("SBS: matting left eye...")
+            for each frame:
+                split → left / right
+                left_matte  = proc_l.process_frame(left)
+                right_matte = proc_r.process_frame(right)
+                merged = merge_mattes(left_matte, right_matte)
+                save merged PNG → mattes_dir
+                delete source PNG immediately
+                discard all intermediate arrays
+
+        Every ``config.chunk_size`` merged mattes, encode a segment
+        video and delete the matte PNGs — keeping the pool bounded.
+
+        Both InferenceCore instances live on the same GPU and take
+        turns — no GPU contention because process_frame() is called
+        sequentially, not concurrently.
+        """
+        logger.info("SBS mode: processing per-eye (interleaved)")
+
         needs_first = (
             config.model_variant == "matanyone2"
             or config.pov_mode
         )
-        left_first = left_frames[0] if needs_first else None
-        proc_l = create_processor(
-            variant=config.model_variant,
-            downsample_ratio=config.downsample_ratio,
-            first_frame=left_first,
-            pov_mode=config.pov_mode,
-        )
 
-        left_mattes = []
-        for i, lf in enumerate(left_frames):
+        # Load only the first frame to seed both processors.
+        first_full = np.array(
+            Image.open(frame_files[0]).convert("RGB")
+        )
+        left_first, right_first = split_frame(first_full)
+        del first_full
+
+        logger.info("SBS: initialising left-eye processor...")
+        proc_l = self._make_processor(
+            config, left_first if needs_first else None
+        )
+        logger.info("SBS: initialising right-eye processor...")
+        proc_r = self._make_processor(
+            config, right_first if needs_first else None
+        )
+        del left_first, right_first
+
+        seg_idx = 0
+        seg_frame = 0
+
+        # ── Per-frame interleaved loop ───────────────────────────
+        for i, frame_file in enumerate(frame_files):
             if self._cancelled:
+                proc_l.cleanup()
+                proc_r.cleanup()
                 raise InterruptedError(
                     "Pipeline cancelled by user"
                 )
+
             if i % _DISK_CHECK_INTERVAL == 0:
                 self._check_disk_free(mattes_dir)
-            left_mattes.append(proc_l.process_frame(lf))
-            self._emit_matte_progress(
-                i, total_frames * 2,
-                merge_frames(lf, right_frames[i]),
-                None,
-                stage="Matting left eye",
+
+            full = np.array(
+                Image.open(frame_file).convert("RGB")
             )
+            left, right = split_frame(full)
+
+            left_matte  = proc_l.process_frame(left)
+            right_matte = proc_r.process_frame(right)
+            merged = merge_mattes(left_matte, right_matte)
+
+            seg_frame += 1
+            Image.fromarray(merged, mode="L").save(
+                mattes_dir / f"frame_{seg_frame:06d}.png"
+            )
+
+            # Delete source PNG immediately.
+            try:
+                frame_file.unlink()
+            except OSError:
+                pass
+
+            self._emit_matte_progress(
+                i, total_frames, full, merged,
+                stage="Matting SBS (L+R)",
+            )
+
+            del full, left, right, left_matte, right_matte, merged
+
+            if seg_frame >= config.chunk_size or i == total_frames - 1:
+                self._flush_matte_segment(
+                    mattes_dir, segments_dir, seg_idx,
+                    fps_str=fps_str,
+                    crf=config.crf,
+                )
+                seg_idx += 1
+                seg_frame = 0
+
         proc_l.cleanup()
-
-        # --- Right eye pass ---
-        logger.info("SBS: matting right eye...")
-        right_first = (
-            right_frames[0] if needs_first else None
-        )
-        proc_r = create_processor(
-            variant=config.model_variant,
-            downsample_ratio=config.downsample_ratio,
-            first_frame=right_first,
-            pov_mode=config.pov_mode,
-        )
-
-        right_mattes = []
-        for i, rf in enumerate(right_frames):
-            if self._cancelled:
-                raise InterruptedError(
-                    "Pipeline cancelled by user"
-                )
-            if i % _DISK_CHECK_INTERVAL == 0:
-                self._check_disk_free(mattes_dir)
-            right_mattes.append(proc_r.process_frame(rf))
-            self._emit_matte_progress(
-                total_frames + i, total_frames * 2,
-                merge_frames(left_frames[i], rf),
-                None,
-                stage="Matting right eye",
-            )
         proc_r.cleanup()
 
-        # --- Merge and save ---
-        logger.info("SBS: merging per-eye mattes...")
-        for i, ff in enumerate(frame_files):
-            merged = merge_mattes(
-                left_mattes[i], right_mattes[i]
+    def _flush_matte_segment(
+        self,
+        mattes_dir: Path,
+        segments_dir: Path,
+        seg_idx: int,
+        fps_str: str,
+        crf: int,
+    ) -> None:
+        """Encode all PNGs in mattes_dir into a segment video, then delete them.
+
+        Uses libx264 with yuv420p for broad compatibility with the
+        concat step.  The encode is fast because the input frames are
+        already at matte resolution (grayscale, single channel).
+
+        Args:
+            mattes_dir: Directory containing frame_%06d.png files.
+            segments_dir: Where to write the segment .mp4 file.
+            seg_idx: Segment number (used for the output filename).
+            fps_str: Frame-rate string (e.g. "60000/1001") from ffprobe.
+            crf: Quality setting for the segment encode.
+        """
+        segment_path = segments_dir / f"segment_{seg_idx:06d}.mp4"
+        subprocess.run([
+            "ffmpeg", "-y",
+            "-framerate", fps_str,
+            "-i", str(mattes_dir / "frame_%06d.png"),
+            "-c:v", "libx264", "-crf", str(crf),
+            "-pix_fmt", "yuv420p",
+            str(segment_path),
+        ], check=True, stdin=subprocess.DEVNULL,
+           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        # Delete all PNGs — segment video is the canonical record now.
+        for png in mattes_dir.glob("frame_*.png"):
+            try:
+                png.unlink()
+            except OSError:
+                pass
+
+        logger.debug(
+            f"Flushed segment {seg_idx} → {segment_path.name}"
+        )
+
+    def _concat_matte_segments(
+        self,
+        segments_dir: Path,
+        output_path: Path,
+        fps_str: str,
+        crf: int,
+    ) -> None:
+        """Concatenate all segment videos into a single matte video.
+
+        Uses the ffmpeg concat demuxer with stream-copy — no re-encode,
+        so this step is fast regardless of total frame count.
+
+        Falls back to a single-segment copy if only one segment exists.
+
+        Args:
+            segments_dir: Directory containing segment_NNNNNN.mp4 files.
+            output_path: Destination matte video path.
+            fps_str: Frame-rate string (passed through for single-file case).
+            crf: Unused here but kept for signature consistency.
+        """
+        segments = sorted(segments_dir.glob("segment_*.mp4"))
+        if not segments:
+            raise RuntimeError(
+                "No matte segments found — matting stage may have failed."
             )
-            Image.fromarray(
-                merged, mode="L"
-            ).save(mattes_dir / ff.name)
+
+        if len(segments) == 1:
+            # Single segment: just rename/copy.
+            shutil.copy2(segments[0], output_path)
+            return
+
+        # Write a concat list file that ffmpeg can read.
+        concat_list = segments_dir / "concat_list.txt"
+        with concat_list.open("w") as f:
+            for seg in segments:
+                # ffmpeg requires forward slashes and escaped single quotes.
+                safe = str(seg).replace("\\", "/").replace("'", "\'")
+                f.write(f"file '{safe}'\n")
+
+        subprocess.run([
+            "ffmpeg", "-y",
+            "-f", "concat", "-safe", "0",
+            "-i", str(concat_list),
+            "-c", "copy",
+            str(output_path),
+        ], check=True, stdin=subprocess.DEVNULL,
+           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        concat_list.unlink(missing_ok=True)
+        logger.info(
+            f"Concatenated {len(segments)} segments → {output_path.name}"
+        )
 
     def _emit_matte_progress(
         self, i, total, source, matte,
@@ -609,31 +783,54 @@ class Pipeline:
     def _estimate_disk_bytes(
         width: int, height: int, num_frames: int,
         is_deovr: bool = False,
+        chunk_size: int = 500,
     ) -> int:
-        """Estimate required temp disk space in bytes.
+        """Estimate peak temp disk space in bytes under the chunked pipeline.
 
-        PNG frames ≈ width × height × 3 × 0.5 (compression).
-        We store source frames + matte frames + intermediate
-        videos, so roughly 3× the frame data.
+        Storage model:
+        - Source PNGs: all extracted upfront, deleted one-by-one during
+          the matte pass.  Peak = all num_frames × source_png_size.
+        - Matte PNGs: at most chunk_size live on disk at any time before
+          they are flushed to a segment video and deleted.
+        - Segment videos: all segments accumulate until the concat step.
+          Encoded H.264 at CRF 18 ≈ 5–8 % of raw uncompressed size.
+        - DeoVR pipeline adds an extra fisheye video + red-channel matte.
 
         Args:
-            width: Video width.
-            height: Video height.
-            num_frames: Number of frames to process.
-            is_deovr: DeoVR pipeline creates extra intermediates.
+            width: Video width in pixels.
+            height: Video height in pixels.
+            num_frames: Total frames to process.
+            is_deovr: True when producing DeoVR alpha-packed output.
+            chunk_size: Matte frames per segment (from PipelineConfig).
 
         Returns:
-            Estimated bytes needed.
+            Estimated peak bytes needed.
         """
-        bytes_per_frame = int(width * height * 3 * 0.5)
-        # source PNGs + matte PNGs
-        frame_bytes = bytes_per_frame * num_frames * 2
-        # intermediate video files (~10% of uncompressed)
-        video_overhead = int(
-            width * height * 3 * num_frames * 0.1
+        # Source PNGs (RGB, compressed ≈ 50 % of raw).
+        source_png_per_frame = int(width * height * 3 * 0.5)
+        all_source_pngs = source_png_per_frame * num_frames
+
+        # Matte PNGs (grayscale, compressed ≈ 50 % of raw).
+        matte_png_per_frame = int(width * height * 1 * 0.5)
+        peak_matte_pngs = matte_png_per_frame * chunk_size
+
+        # Segment videos: all N segments exist simultaneously until
+        # concat finishes.  H.264 CRF-18 ≈ 6 % of raw uncompressed.
+        raw_matte_per_frame = width * height  # 1 byte grayscale
+        all_segments = int(raw_matte_per_frame * num_frames * 0.06)
+
+        # DeoVR adds a fisheye video + red-channel matte video.
+        deovr_overhead = (
+            int(width * height * 3 * num_frames * 0.06) * 2
+            if is_deovr else 0
         )
-        multiplier = 2 if is_deovr else 1
-        return frame_bytes + (video_overhead * multiplier)
+
+        return (
+            all_source_pngs
+            + peak_matte_pngs
+            + all_segments
+            + deovr_overhead
+        )
 
     @staticmethod
     def _check_disk_space(path: Path, required: int) -> None:
