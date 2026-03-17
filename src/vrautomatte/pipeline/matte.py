@@ -49,6 +49,7 @@ def create_processor(
     device: torch.device | None = None,
     downsample_ratio: float = 0.25,
     first_frame: np.ndarray | None = None,
+    pov_mode: bool = False,
 ) -> MatteProcessor:
     """Create a matting processor for the given variant.
 
@@ -60,6 +61,7 @@ def create_processor(
         device: Target device. Auto-detected if None.
         downsample_ratio: RVM downscale (ignored for MA2).
         first_frame: First video frame (required for matanyone2).
+        pov_mode: If True, select non-POV person mask.
 
     Returns:
         A MatteProcessor instance.
@@ -88,7 +90,7 @@ def create_processor(
             device = get_device()
 
         mask = generate_first_frame_mask(
-            first_frame, device
+            first_frame, device, pov_mode=pov_mode
         )
         return MatAnyone2Processor(
             first_frame_mask=mask, device=device

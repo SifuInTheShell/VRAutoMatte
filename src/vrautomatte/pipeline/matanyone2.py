@@ -24,18 +24,106 @@ _SAM2_VARIANTS = {
 }
 
 
+def _mask_center_of_mass(seg: np.ndarray) -> tuple:
+    """Return (cy, cx) center of mass for a binary mask."""
+    ys, xs = np.where(seg)
+    if len(ys) == 0:
+        return (0, 0)
+    return (ys.mean(), xs.mean())
+
+
+def _select_non_pov_mask(
+    masks: list, frame_shape: tuple
+) -> np.ndarray:
+    """Select the non-POV person mask for POV content.
+
+    POV body heuristic: in first-person content, the POV
+    body tends to occupy the lower portion and edges of
+    the frame. The other person is typically centered
+    vertically and horizontally (facing the camera).
+
+    Scoring: prefer masks whose center of mass is in the
+    upper-center region. Penalize masks that touch the
+    bottom edge heavily or are extremely large (full-frame
+    POV body).
+
+    Args:
+        masks: SAM2 mask list with 'segmentation' and 'area'.
+        frame_shape: (H, W, C) of the original frame.
+
+    Returns:
+        Binary mask (H, W), uint8 (0 or 255).
+    """
+    h, w = frame_shape[:2]
+    total_px = h * w
+    center_y, center_x = h / 2, w / 2
+
+    # Filter to meaningful masks (>1% of frame)
+    candidates = [
+        m for m in masks if m["area"] > total_px * 0.01
+    ]
+    if not candidates:
+        candidates = masks
+
+    scored = []
+    for m in candidates:
+        seg = m["segmentation"]
+        area_frac = m["area"] / total_px
+        cy, cx = _mask_center_of_mass(seg)
+
+        # Distance from center (normalized 0-1)
+        dist_y = abs(cy - center_y) / center_y
+        dist_x = abs(cx - center_x) / center_x
+
+        # Bottom-edge contact: fraction of bottom row
+        bottom_rows = seg[int(h * 0.85):, :]
+        bottom_frac = (
+            bottom_rows.sum() / max(bottom_rows.size, 1)
+        )
+
+        # Score: prefer centered, penalize bottom-heavy
+        # and extremely large (POV body covers >60%)
+        score = 1.0
+        score -= dist_y * 0.3      # penalize far from v-center
+        score -= dist_x * 0.2      # penalize far from h-center
+        score -= bottom_frac * 0.4  # penalize bottom contact
+        if area_frac > 0.6:
+            score -= 0.3           # penalize very large masks
+        # Slight preference for larger subjects
+        score += min(area_frac, 0.4) * 0.2
+
+        scored.append((score, m))
+        logger.debug(
+            f"POV mask score={score:.2f} area={area_frac:.2%} "
+            f"center=({cy:.0f},{cx:.0f}) bottom={bottom_frac:.2%}"
+        )
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    best_mask = scored[0][1]
+    best = best_mask["segmentation"].astype(np.uint8) * 255
+
+    logger.info(
+        f"POV mask selected: score={scored[0][0]:.2f}, "
+        f"coverage={best_mask['area']}/{total_px}"
+    )
+    return best
+
+
 def generate_first_frame_mask(
     frame: np.ndarray,
     device: torch.device | None = None,
+    pov_mode: bool = False,
 ) -> np.ndarray:
-    """Auto-generate a person segmentation mask from frame 1.
+    """Auto-generate a segmentation mask from frame 1.
 
-    Uses SAM2's automatic mask generator to find the largest
-    person-shaped region in the frame.
+    In default mode, picks the largest mask (the main subject).
+    In POV mode, picks the non-POV person — the subject facing
+    the camera, excluding the POV body at the frame edges/bottom.
 
     Args:
         frame: RGB array (H, W, 3), uint8.
         device: Target device. Auto-detected if None.
+        pov_mode: If True, exclude the POV body from the mask.
 
     Returns:
         Binary mask (H, W), uint8 (0 or 255).
@@ -79,14 +167,19 @@ def generate_first_frame_mask(
             "The video may be too dark or featureless."
         )
 
-    # Pick the largest mask (most likely the person)
-    masks.sort(key=lambda m: m["area"], reverse=True)
-    best = masks[0]["segmentation"].astype(np.uint8) * 255
-
-    logger.info(
-        f"Mask generated: {best.shape}, "
-        f"coverage={masks[0]['area']}/{frame.shape[0]*frame.shape[1]}"
-    )
+    if pov_mode:
+        best = _select_non_pov_mask(masks, frame.shape)
+    else:
+        # Pick the largest mask (most likely the person)
+        masks.sort(key=lambda m: m["area"], reverse=True)
+        best = masks[0]["segmentation"].astype(
+            np.uint8
+        ) * 255
+        logger.info(
+            f"Mask generated: {best.shape}, "
+            f"coverage={masks[0]['area']}/"
+            f"{frame.shape[0]*frame.shape[1]}"
+        )
 
     # Cleanup SAM2 to free GPU memory (D003)
     del mask_gen, predictor

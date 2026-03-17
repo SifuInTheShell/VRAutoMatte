@@ -17,6 +17,7 @@ _DEFAULTS = {
     "fisheye_fov": 180,
     "codec": 0,                  # 0=HEVC, 1=H.264
     "is_sbs": False,             # SBS per-eye processing
+    "pov_mode": False,           # Remove POV body
     "last_input_dir": "",
     "last_output_dir": "",
     "window_width": 900,

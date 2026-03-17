@@ -361,6 +361,13 @@ class MainWindow(QMainWindow):
             "color: #6a9a6a; font-size: 11px;"
         )
         sbs_row.addWidget(self.sbs_auto_label)
+        sbs_row.addSpacing(20)
+        self.pov_check = QCheckBox("POV Mode")
+        self.pov_check.setToolTip(
+            "Remove POV body and background — keep only "
+            "the other person. Best with MatAnyone 2."
+        )
+        sbs_row.addWidget(self.pov_check)
         sbs_row.addStretch()
         settings_layout.addLayout(sbs_row)
 
@@ -451,6 +458,7 @@ class MainWindow(QMainWindow):
         self.fov_slider.setValue(s.get("fisheye_fov", 180))
         self.codec_combo.setCurrentIndex(s.get("codec", 0))
         self.sbs_check.setChecked(s.get("is_sbs", False))
+        self.pov_check.setChecked(s.get("pov_mode", False))
         self.resize(
             s.get("window_width", 900),
             s.get("window_height", 780),
@@ -467,6 +475,7 @@ class MainWindow(QMainWindow):
             "fisheye_fov": self.fov_slider.value(),
             "codec": self.codec_combo.currentIndex(),
             "is_sbs": self.sbs_check.isChecked(),
+            "pov_mode": self.pov_check.isChecked(),
             "window_width": self.width(),
             "window_height": self.height(),
         })
@@ -774,6 +783,7 @@ class MainWindow(QMainWindow):
             ),
             crf=self.crf_slider.value(),
             is_sbs=self.sbs_check.isChecked(),
+            pov_mode=self.pov_check.isChecked(),
         )
 
         if self.format_combo.currentIndex() == 1:
