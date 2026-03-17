@@ -30,19 +30,43 @@ and produce a file ready for DeoVR passthrough playback on Quest headsets.
 - Uses DeoVR's documented FFmpeg conversion pipeline
 - Red channel only for the alpha matte
 
-## Future Enhancements
+### D4: MatAnyone 2 + SAM2 Integration
 
-- [ ] **MatAnyone 2** support — CVPR 2026 state-of-the-art, better edge quality
-      (requires SAM2 for first-frame mask auto-generation)
-- [ ] **VideoMaMa** support — Adobe's generative matting approach
-- [x] **Batch processing** — queue multiple videos
-- [x] **Auto-download DeoVR mask** — bundle or download mask8k.png
-- [ ] **SBS split mode** — process left/right eyes independently for better quality
-- [x] **Audio preservation** — ensure audio track carries through all steps
-- [x] **Preview scrubber** — frame scrubber with ETA/FPS display
-- [x] **Settings persistence** — remember last-used settings
-- [ ] **Drag & drop** — drop video files onto the window
-- [ ] **ETA per-batch** — overall batch ETA, not just per-file
+- CVPR 2026 SOTA matting model with best edge quality
+- SAM2 auto-generates first-frame mask — zero manual input
+- Sequential GPU loading (SAM2 → unload → MatAnyone 2) to fit in 6-8GB VRAM
+- Protocol-based processor design for model interchangeability
+
+### D5: POV Body Removal
+
+- SAM2 detects POV body via inverse scoring heuristic (bottom-heavy, edge-touching)
+- MatAnyone 2: instance-level exclusion (quality)
+- RVM: static mask subtraction via POVExclusionProcessor wrapper (fast)
+
+### D6: Scene Change Detection
+
+- Histogram correlation (Pearson) per frame
+- Threshold 0.4 with 30-frame cooldown
+- Triggers SAM2 mask refresh on cuts or major position changes
+
+## Feature Status
+
+- [x] **RVM matting** — MobileNetV3 and ResNet50 variants
+- [x] **MatAnyone 2** — CVPR 2026 SOTA, SAM2 auto-mask
+- [x] **POV body removal** — auto-detect and exclude camera operator
+- [x] **Scene change detection** — auto-refresh masks on cuts
+- [x] **SBS stereo processing** — per-eye matting with auto-detection
+- [x] **DeoVR alpha packing** — equirect → fisheye → red channel → pack
+- [x] **Batch processing** — queue and process multiple videos
+- [x] **Live preview** — dual-pane with scrubber, ETA, FPS
+- [x] **Drag & drop** — single file or batch
+- [x] **Settings persistence** — all preferences saved
+- [x] **Light / dark theme** — toggle with persistence
+- [x] **Auto-download DeoVR mask** — fetched on first use
+- [x] **Audio preservation** — audio track carries through
+- [ ] **VideoMaMa support** — Adobe's generative matting (future)
+- [ ] **Manual click-to-segment** — user-guided SAM2 prompting (future)
+- [ ] **Per-batch ETA** — overall batch progress estimate (future)
 
 ## Research Notes
 
@@ -51,10 +75,8 @@ and produce a file ready for DeoVR passthrough playback on Quest headsets.
 | Model | Type | Input Required | Quality | Speed | Year |
 |-------|------|---------------|---------|-------|------|
 | **RVM** | Recurrent | None (auto) | Good | Very fast | 2021 |
-| **MatAnyone** | Memory-based | First-frame mask | Very good | Medium | 2025 |
-| **MatAnyone 2** | Memory-based + MQE | First-frame mask | Best | Medium | 2026 |
+| **MatAnyone 2** | Memory-based + MQE | Auto (SAM2) | Best | Medium | 2026 |
 | **VideoMaMa** | Diffusion-based | Coarse mask | Very good | Slow | 2026 |
-| **rembg** | Per-frame | None | Basic | Fast | 2022 |
 
 ### DeoVR Alpha Format
 
