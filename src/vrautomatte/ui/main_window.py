@@ -42,144 +42,334 @@ from vrautomatte.utils.settings import load_settings, save_settings
 
 
 DARK_STYLE = """
+/* ── Base ── */
 QMainWindow, QWidget {
-    background-color: #0f0f1a;
-    color: #e0e0e0;
-    font-family: 'Segoe UI', 'SF Pro Display', sans-serif;
+    background-color: #111118;
+    color: #d4d4de;
+    font-family: 'Segoe UI Variable', 'Segoe UI', system-ui;
     font-size: 13px;
 }
+
+/* ── Group Boxes ── */
 QGroupBox {
-    border: 1px solid #2a2a3e;
-    border-radius: 6px;
-    margin-top: 12px;
-    padding-top: 16px;
-    font-weight: bold;
-    color: #b0b0cc;
+    background-color: #16161f;
+    border: 1px solid #1e1e2c;
+    border-radius: 10px;
+    margin-top: 14px;
+    padding: 20px 14px 14px 14px;
+    font-weight: 600;
+    font-size: 12px;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    color: #5a7a8a;
 }
 QGroupBox::title {
     subcontrol-origin: margin;
-    left: 12px;
-    padding: 0 6px;
+    left: 16px;
+    padding: 0 8px;
+    color: #5a7a8a;
 }
+
+/* ── Text Inputs ── */
 QLineEdit {
-    background-color: #1a1a2e;
-    border: 1px solid #333355;
-    border-radius: 4px;
-    padding: 6px 10px;
-    color: #e0e0e0;
-    selection-background-color: #4a4a8e;
+    background-color: #0d0d14;
+    border: 1px solid #1e1e2c;
+    border-radius: 6px;
+    padding: 8px 12px;
+    color: #d4d4de;
+    font-size: 13px;
+    selection-background-color: #2a5a6a;
 }
 QLineEdit:focus {
-    border-color: #6666aa;
+    border-color: #3a8a9a;
+    background-color: #0f0f18;
 }
+QLineEdit[readOnly="true"] {
+    color: #888898;
+}
+
+/* ── Buttons ── */
 QPushButton {
-    background-color: #2a2a4e;
-    border: 1px solid #3a3a5e;
-    border-radius: 4px;
-    padding: 6px 16px;
-    color: #d0d0ee;
-    font-weight: bold;
+    background-color: #1a1a28;
+    border: 1px solid #2a2a3c;
+    border-radius: 6px;
+    padding: 7px 18px;
+    color: #b0b0c8;
+    font-weight: 600;
+    font-size: 12px;
+    letter-spacing: 0.3px;
 }
 QPushButton:hover {
-    background-color: #3a3a6e;
-    border-color: #5a5a8e;
+    background-color: #222236;
+    border-color: #3a5a6a;
+    color: #d0d0e8;
 }
 QPushButton:pressed {
-    background-color: #1a1a3e;
+    background-color: #141420;
+    border-color: #3a8a9a;
 }
 QPushButton:disabled {
-    background-color: #1a1a2e;
-    color: #555;
-    border-color: #222;
+    background-color: #121218;
+    color: #3a3a48;
+    border-color: #1a1a24;
 }
+
+/* Start Button — teal glow */
 QPushButton#startButton {
-    background-color: #2e5a2e;
-    border-color: #3e7a3e;
-    color: #c0eec0;
+    background: qlineargradient(
+        x1:0, y1:0, x2:1, y2:1,
+        stop:0 #1a3a3a, stop:1 #1a4a4a
+    );
+    border: 1px solid #2a6a6a;
+    border-radius: 8px;
+    color: #a0e8e8;
     font-size: 14px;
-    padding: 8px 24px;
+    font-weight: 700;
+    padding: 10px 28px;
+    letter-spacing: 0.5px;
 }
 QPushButton#startButton:hover {
-    background-color: #3e7a3e;
+    background: qlineargradient(
+        x1:0, y1:0, x2:1, y2:1,
+        stop:0 #1e4a4a, stop:1 #1e5a5a
+    );
+    border-color: #3a8a8a;
+    color: #c0ffff;
 }
+QPushButton#startButton:pressed {
+    background-color: #163636;
+}
+QPushButton#startButton:disabled {
+    background-color: #121820;
+    border-color: #1a2a2a;
+    color: #3a5a5a;
+}
+
+/* Cancel Button — warm red */
 QPushButton#cancelButton {
-    background-color: #5a2e2e;
-    border-color: #7a3e3e;
-    color: #eec0c0;
+    background: qlineargradient(
+        x1:0, y1:0, x2:1, y2:1,
+        stop:0 #3a1a1a, stop:1 #4a1a1a
+    );
+    border: 1px solid #6a2a2a;
+    color: #f0a0a0;
+    font-weight: 600;
 }
 QPushButton#cancelButton:hover {
-    background-color: #7a3e3e;
+    background-color: #4a2020;
+    border-color: #8a3a3a;
+    color: #ffc0c0;
 }
+
+/* + Queue button — subtle */
+QPushButton#addBatchButton {
+    background-color: transparent;
+    border: 1px dashed #2a3a4a;
+    color: #5a8a9a;
+    padding: 7px 14px;
+}
+QPushButton#addBatchButton:hover {
+    border-color: #3a8a9a;
+    color: #8abaca;
+    background-color: #141820;
+}
+
+/* ── Combo Boxes ── */
 QComboBox {
-    background-color: #1a1a2e;
-    border: 1px solid #333355;
-    border-radius: 4px;
-    padding: 4px 8px;
-    color: #e0e0e0;
+    background-color: #0d0d14;
+    border: 1px solid #1e1e2c;
+    border-radius: 6px;
+    padding: 6px 10px;
+    color: #d4d4de;
+    font-size: 12px;
+    min-width: 100px;
+}
+QComboBox:hover {
+    border-color: #3a5a6a;
 }
 QComboBox::drop-down {
     border: none;
-    width: 20px;
+    width: 24px;
+    subcontrol-position: right center;
+}
+QComboBox::down-arrow {
+    image: none;
+    border-left: 4px solid transparent;
+    border-right: 4px solid transparent;
+    border-top: 5px solid #5a5a7a;
+    margin-right: 8px;
 }
 QComboBox QAbstractItemView {
-    background-color: #1a1a2e;
-    border: 1px solid #333355;
-    color: #e0e0e0;
-    selection-background-color: #3a3a6e;
+    background-color: #0d0d14;
+    border: 1px solid #2a2a3c;
+    border-radius: 4px;
+    color: #d4d4de;
+    selection-background-color: #1a3a4a;
+    selection-color: #a0e8e8;
+    padding: 4px;
+    outline: 0;
 }
+
+/* ── Check Boxes ── */
+QCheckBox {
+    spacing: 8px;
+    color: #b0b0c8;
+    font-size: 12px;
+}
+QCheckBox::indicator {
+    width: 16px;
+    height: 16px;
+    border: 2px solid #2a3a4a;
+    border-radius: 4px;
+    background-color: #0d0d14;
+}
+QCheckBox::indicator:hover {
+    border-color: #3a6a7a;
+}
+QCheckBox::indicator:checked {
+    background-color: #2a6a6a;
+    border-color: #3a8a8a;
+    image: none;
+}
+QCheckBox::indicator:checked:hover {
+    background-color: #3a7a7a;
+}
+
+/* ── Sliders ── */
 QSlider::groove:horizontal {
-    border: 1px solid #333;
-    height: 6px;
-    background: #1a1a2e;
-    border-radius: 3px;
+    border: none;
+    height: 4px;
+    background: #1a1a28;
+    border-radius: 2px;
 }
 QSlider::handle:horizontal {
-    background: #6666aa;
-    border: 1px solid #8888cc;
-    width: 14px;
-    margin: -4px 0;
-    border-radius: 7px;
+    background: qradialgradient(
+        cx:0.5, cy:0.5, radius:0.5,
+        fx:0.5, fy:0.5,
+        stop:0 #5ac0c0, stop:0.7 #3a8a9a, stop:1 #2a6a7a
+    );
+    border: none;
+    width: 16px;
+    height: 16px;
+    margin: -6px 0;
+    border-radius: 8px;
+}
+QSlider::handle:horizontal:hover {
+    background: qradialgradient(
+        cx:0.5, cy:0.5, radius:0.5,
+        fx:0.5, fy:0.5,
+        stop:0 #7ae0e0, stop:0.7 #4aa0aa, stop:1 #3a8a9a
+    );
 }
 QSlider::sub-page:horizontal {
-    background: #4a4a8e;
-    border-radius: 3px;
+    background: qlineargradient(
+        x1:0, y1:0, x2:1, y2:0,
+        stop:0 #2a6a7a, stop:1 #3a8a9a
+    );
+    border-radius: 2px;
 }
+
+/* ── Progress Bar — glow effect ── */
 QProgressBar {
-    border: 1px solid #333355;
-    border-radius: 4px;
+    border: 1px solid #1e1e2c;
+    border-radius: 6px;
     text-align: center;
-    background-color: #1a1a2e;
-    color: #b0b0cc;
-    height: 22px;
+    background-color: #0d0d14;
+    color: #8abaca;
+    height: 24px;
+    font-size: 11px;
+    font-weight: 600;
 }
 QProgressBar::chunk {
-    background-color: #4a4a8e;
-    border-radius: 3px;
+    background: qlineargradient(
+        x1:0, y1:0, x2:1, y2:0,
+        stop:0 #1a4a5a, stop:0.5 #2a7a8a, stop:1 #1a5a6a
+    );
+    border-radius: 5px;
+}
+
+/* ── Labels ── */
+QLabel {
+    color: #9898aa;
+    font-size: 12px;
 }
 QLabel#statusLabel {
-    color: #888;
+    color: #6a6a7a;
     font-size: 12px;
+    font-weight: 500;
 }
 QLabel#deviceLabel {
-    color: #6a6a9e;
+    color: #4a6a7a;
     font-size: 11px;
+    font-style: italic;
 }
+
+/* ── List Widget (Batch Queue) ── */
 QListWidget {
-    background-color: #1a1a2e;
-    border: 1px solid #2a2a3e;
-    border-radius: 4px;
-    color: #c0c0dd;
+    background-color: #0d0d14;
+    border: 1px solid #1e1e2c;
+    border-radius: 6px;
+    color: #b0b0c8;
     font-size: 12px;
+    outline: 0;
 }
 QListWidget::item {
-    padding: 4px 8px;
-    border-bottom: 1px solid #1f1f30;
+    padding: 6px 10px;
+    border-bottom: 1px solid #14141e;
 }
 QListWidget::item:selected {
-    background-color: #2a2a4e;
+    background-color: #1a2a3a;
+    color: #a0e8e8;
 }
 QListWidget::item:hover {
-    background-color: #22223a;
+    background-color: #16162a;
+}
+
+/* ── Splitter ── */
+QSplitter::handle {
+    background-color: #1a1a28;
+    width: 2px;
+}
+
+/* ── Scroll Bar ── */
+QScrollBar:vertical {
+    background: #0d0d14;
+    width: 8px;
+    border: none;
+    border-radius: 4px;
+}
+QScrollBar::handle:vertical {
+    background: #2a2a3c;
+    border-radius: 4px;
+    min-height: 30px;
+}
+QScrollBar::handle:vertical:hover {
+    background: #3a3a5a;
+}
+QScrollBar::add-line:vertical,
+QScrollBar::sub-line:vertical {
+    height: 0;
+}
+QScrollBar:horizontal {
+    background: #0d0d14;
+    height: 8px;
+    border: none;
+    border-radius: 4px;
+}
+QScrollBar::handle:horizontal {
+    background: #2a2a3c;
+    border-radius: 4px;
+    min-width: 30px;
+}
+
+/* ── Tooltips ── */
+QToolTip {
+    background-color: #1a1a28;
+    color: #d4d4de;
+    border: 1px solid #2a3a4a;
+    border-radius: 4px;
+    padding: 6px 10px;
+    font-size: 12px;
 }
 """
 
@@ -198,7 +388,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("VRAutoMatte")
-        self.setMinimumSize(800, 700)
+        self.setMinimumSize(860, 720)
         self.worker: PipelineWorker | None = None
         self._batch_queue: list[dict] = []
         self._batch_index = 0
@@ -213,8 +403,8 @@ class MainWindow(QMainWindow):
         central = QWidget()
         self.setCentralWidget(central)
         root = QVBoxLayout(central)
-        root.setSpacing(8)
-        root.setContentsMargins(16, 16, 16, 16)
+        root.setSpacing(10)
+        root.setContentsMargins(18, 18, 18, 18)
 
         # ── File I/O ──
         io_group = QGroupBox("Files")
@@ -233,6 +423,7 @@ class MainWindow(QMainWindow):
         self.input_btn.clicked.connect(self._browse_input)
         in_row.addWidget(self.input_btn)
         self.add_batch_btn = QPushButton("+ Queue")
+        self.add_batch_btn.setObjectName("addBatchButton")
         self.add_batch_btn.setToolTip(
             "Add current file to the batch queue"
         )
@@ -256,7 +447,8 @@ class MainWindow(QMainWindow):
         # Video info
         self.info_label = QLabel("")
         self.info_label.setStyleSheet(
-            "color: #6a6a9e; font-size: 11px;"
+            "color: #4a6a7a; font-size: 11px; "
+            "font-family: 'Cascadia Code', 'Consolas', monospace;"
         )
         io_layout.addWidget(self.info_label)
 
@@ -358,7 +550,7 @@ class MainWindow(QMainWindow):
         sbs_row.addWidget(self.sbs_check)
         self.sbs_auto_label = QLabel("")
         self.sbs_auto_label.setStyleSheet(
-            "color: #6a9a6a; font-size: 11px;"
+            "color: #3a8a7a; font-size: 10px; font-style: italic;"
         )
         sbs_row.addWidget(self.sbs_auto_label)
         sbs_row.addSpacing(20)
@@ -375,7 +567,8 @@ class MainWindow(QMainWindow):
         sbs_row.addWidget(self.pov_check)
         self.pov_warning = QLabel("")
         self.pov_warning.setStyleSheet(
-            "color: #e0a040; font-size: 11px;"
+            "color: #c09040; font-size: 10px; "
+            "font-style: italic;"
         )
         sbs_row.addWidget(self.pov_warning)
         sbs_row.addStretch()
@@ -761,14 +954,16 @@ class MainWindow(QMainWindow):
                 "✓ Best quality (instance matting)"
             )
             self.pov_warning.setStyleSheet(
-                "color: #60c060; font-size: 11px;"
+                "color: #3aaa8a; font-size: 10px; "
+                "font-style: italic;"
             )
         else:
             self.pov_warning.setText(
                 "⚡ Fast mode (static mask subtraction)"
             )
             self.pov_warning.setStyleSheet(
-                "color: #e0a040; font-size: 11px;"
+                "color: #c09040; font-size: 10px; "
+                "font-style: italic;"
             )
 
     def _update_device_label(self):
@@ -782,7 +977,7 @@ class MainWindow(QMainWindow):
 
             if info["device"] == "cpu":
                 self.device_label.setStyleSheet(
-                    "color: #e0a040; font-size: 11px;"
+                    "color: #c09040; font-size: 11px;"
                 )
                 self.device_label.setText(
                     "⚠️ CPU mode — processing will be slower"
