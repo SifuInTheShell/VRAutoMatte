@@ -156,11 +156,11 @@ class MainWindow(QMainWindow):
             "resnet50 (quality)",
             "MatAnyone 2 (quality+)"
             if self._ma2_available
-            else "MatAnyone 2 ⛔ not installed",
+            else "MatAnyone 2 — click to install",
         ])
-        if not self._ma2_available:
-            # Grey out the MatAnyone 2 option
-            self.model_combo.model().item(2).setEnabled(False)
+        self.model_combo.currentIndexChanged.connect(
+            self._on_model_changed
+        )
         row1.addWidget(self.model_combo)
         row1.addSpacing(20)
         row1.addWidget(QLabel("Output Format:"))
@@ -260,11 +260,6 @@ class MainWindow(QMainWindow):
         sbs_row.addStretch()
         settings_layout.addLayout(sbs_row)
 
-        # Connect model change to POV warning update
-        self.model_combo.currentIndexChanged.connect(
-            self._update_pov_warning
-        )
-
         root.addWidget(settings_group)
 
         # ── Preview ──
@@ -344,10 +339,9 @@ class MainWindow(QMainWindow):
     def _restore_settings(self):
         """Restore saved settings to the UI widgets."""
         s = self._settings
-        model_idx = s.get("model_variant", 0)
-        if model_idx == 2 and not self._ma2_available:
-            model_idx = 0  # Fall back if MA2 uninstalled
-        self.model_combo.setCurrentIndex(model_idx)
+        self.model_combo.setCurrentIndex(
+            s.get("model_variant", 0)
+        )
         self.downsample_combo.setCurrentIndex(
             s.get("downsample_ratio", 1)
         )
@@ -678,6 +672,21 @@ class MainWindow(QMainWindow):
         )
         self.preview.apply_colors(c)
 
+    def _on_model_changed(self, index: int):
+        """Handle model combo selection change.
+
+        If MatAnyone 2 is selected but not installed,
+        trigger the install flow and revert to previous model.
+        """
+        if index == 2 and not self._ma2_available:
+            # Revert to previous selection before install
+            self.model_combo.blockSignals(True)
+            self.model_combo.setCurrentIndex(0)
+            self.model_combo.blockSignals(False)
+            self._offer_install_matanyone2()
+            return
+        self._update_pov_warning()
+
     def _update_pov_warning(self, *_args):
         """Show info about POV quality per model."""
         c = self._colors
@@ -975,9 +984,7 @@ class MainWindow(QMainWindow):
                 self.model_combo.setItemText(
                     2, "MatAnyone 2 (quality+)"
                 )
-                self.model_combo.model().item(2).setEnabled(
-                    True
-                )
+                self.model_combo.setCurrentIndex(2)
             else:
                 status.setText("❌ Installation failed")
 
