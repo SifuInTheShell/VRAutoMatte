@@ -1,0 +1,59 @@
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Python (if used)
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+.eggs/
+
+# Node (if used)
+node_modules/
+npm-debug.log*
+
+# Unity (if used)
+Library/
+Temp/
+Obj/
+Logs/
+UserSettings/
+
+# Build artifacts
+*.o
+*.so
+*.dylib
+*.dll
+*.exe
+
+# Data / models (large files)
+*.onnx
+*.pt
+*.pth
+*.bin
+*.safetensors
+data/
+models/
+outputs/
+
+# Agent internals
+.bg-shell/
+.gsd/
