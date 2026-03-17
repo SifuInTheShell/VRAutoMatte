@@ -150,24 +150,31 @@ class MatAnyone2Processor:
         img_tensor = (
             torch.from_numpy(frame).float().permute(2, 0, 1)
             / 255.0
-        )
+        ).to(self.device)
 
         with torch.no_grad():
             if self._is_first_frame:
+                # Step 1: feed mask into memory
                 mask_tensor = torch.from_numpy(
                     self._mask
-                ).float() / 255.0
-                output = self._processor.step(
+                ).float().to(self.device)
+                self._processor.step(
                     img_tensor,
                     mask_tensor,
+                    objects=[1],
+                )
+                # Step 2: predict using that memory
+                output = self._processor.step(
+                    img_tensor,
                     first_frame_pred=True,
                 )
                 self._is_first_frame = False
             else:
                 output = self._processor.step(img_tensor)
 
-        # output is alpha map in [0, 1]
-        matte = (output * 255).byte().cpu().numpy()
+        # Extract alpha from output probabilities
+        matte = self._processor.output_prob_to_mask(output)
+        matte = (matte * 255).byte().cpu().numpy()
         if matte.ndim == 3:
             matte = matte[0]
         return matte
