@@ -7,6 +7,7 @@ import numpy as np
 from vrautomatte.pipeline.sam2_masks import (
     _mask_center_of_mass,
     _select_non_pov_mask,
+    _select_person_mask,
     _select_pov_body_mask,
 )
 from vrautomatte.pipeline.matte import POVExclusionProcessor
@@ -187,6 +188,83 @@ class TestPOVExclusionProcessor(unittest.TestCase):
         )
         proc.cleanup()
         self.assertEqual(inner._cleanup_count, 1)
+
+
+class TestSelectPersonMask(unittest.TestCase):
+    """Test person mask selection heuristics."""
+
+    def _make_mask(self, seg):
+        return {
+            "segmentation": seg,
+            "area": int(seg.sum()),
+        }
+
+    def test_prefers_centered_over_largest(self):
+        """Centered person-sized mask beats large background."""
+        h, w = 100, 200
+        frame_shape = (h, w, 3)
+
+        # Large background mask (70% of frame)
+        bg = np.ones((h, w), dtype=bool)
+        bg[20:80, 60:140] = False  # hole where person is
+
+        # Small centered person mask (~15% of frame)
+        person = np.zeros((h, w), dtype=bool)
+        person[15:85, 70:130] = True
+
+        masks = [self._make_mask(bg), self._make_mask(person)]
+        result = _select_person_mask(masks, frame_shape)
+
+        # Should pick the person, not the background
+        person_coverage = person.sum()
+        result_coverage = (result > 0).sum()
+        self.assertAlmostEqual(
+            result_coverage, person_coverage, delta=50
+        )
+
+    def test_prefers_tall_aspect_ratio(self):
+        """Tall mask (person-shaped) beats wide mask."""
+        h, w = 200, 200
+        frame_shape = (h, w, 3)
+
+        # Wide mask (landscape shape)
+        wide = np.zeros((h, w), dtype=bool)
+        wide[80:120, 20:180] = True  # 40x160
+
+        # Tall mask (person shape)
+        tall = np.zeros((h, w), dtype=bool)
+        tall[20:180, 80:120] = True  # 160x40
+
+        masks = [self._make_mask(wide), self._make_mask(tall)]
+        result = _select_person_mask(masks, frame_shape)
+
+        # Should prefer the tall mask
+        tall_coverage = tall.sum()
+        result_coverage = (result > 0).sum()
+        self.assertAlmostEqual(
+            result_coverage, tall_coverage, delta=50
+        )
+
+    def test_rejects_huge_background(self):
+        """Mask covering >60% of frame is penalized."""
+        h, w = 100, 200
+        frame_shape = (h, w, 3)
+
+        # Giant mask (90% of frame) — background
+        giant = np.ones((h, w), dtype=bool)
+
+        # Small person mask (10% of frame)
+        person = np.zeros((h, w), dtype=bool)
+        person[30:70, 80:120] = True
+
+        masks = [self._make_mask(giant), self._make_mask(person)]
+        result = _select_person_mask(masks, frame_shape)
+
+        person_coverage = person.sum()
+        result_coverage = (result > 0).sum()
+        self.assertAlmostEqual(
+            result_coverage, person_coverage, delta=50
+        )
 
 
 if __name__ == "__main__":

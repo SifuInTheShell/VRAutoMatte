@@ -22,6 +22,7 @@ from vrautomatte.pipeline.sam2_masks import (  # noqa: F401
     generate_pov_body_mask,
     _mask_center_of_mass,
     _select_non_pov_mask,
+    _select_person_mask,
     _select_pov_body_mask,
 )
 
