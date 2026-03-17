@@ -8,7 +8,7 @@ from loguru import logger
 # DeoVR provides mask files at various resolutions.
 # The mask8k.png is used for the equirect → fisheye overlay.
 _MASK_URL = (
-    "https://deovr.com/static/masks/mask8k.png"
+    "http://rest.s3for.me/insights.deovr.com/images/mask8k.png"
 )
 _FALLBACK_URLS = [
     "https://deovr.com/static/masks/mask8k.png",
