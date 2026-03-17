@@ -16,6 +16,7 @@ _DEFAULTS = {
     "projection": 0,             # 0=equirect→fisheye, 1=already fisheye
     "fisheye_fov": 180,
     "codec": 0,                  # 0=HEVC, 1=H.264
+    "is_sbs": False,             # SBS per-eye processing
     "last_input_dir": "",
     "last_output_dir": "",
     "window_width": 900,

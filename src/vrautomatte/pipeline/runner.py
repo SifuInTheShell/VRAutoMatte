@@ -29,6 +29,12 @@ from vrautomatte.utils.ffmpeg import (
     matte_to_red_channel,
     pack_alpha,
 )
+from vrautomatte.utils.sbs import (
+    detect_sbs,
+    merge_frames,
+    merge_mattes,
+    split_frame,
+)
 
 
 class OutputFormat(str, Enum):
@@ -64,7 +70,7 @@ class PipelineConfig:
     fisheye_mask_path: str = ""          # Path to DeoVR mask8k.png
 
     # SBS processing
-    is_sbs: bool = True                  # Side-by-side stereo
+    is_sbs: bool = False                 # Side-by-side stereo (per-eye)
 
 
 @dataclass
@@ -164,58 +170,21 @@ class Pipeline:
             logger.info("Stage 2: Generating AI mattes...")
             self._matte_start_time = time.monotonic()
 
-            # For MatAnyone 2, load the first frame for SAM2 mask
-            first_frame = None
-            if config.model_variant == "matanyone2":
-                self._emit(PipelineProgress(
-                    stage="Generating first-frame mask",
-                    stage_num=2,
-                    total_stages=self._total_stages(),
-                ))
-                first_img = Image.open(
-                    frame_files[0]
-                ).convert("RGB")
-                first_frame = np.array(first_img)
-
-            processor = create_processor(
-                variant=config.model_variant,
-                downsample_ratio=config.downsample_ratio,
-                first_frame=first_frame,
+            # Determine if we should use SBS per-eye
+            use_sbs = config.is_sbs and detect_sbs(
+                info["width"], info["height"]
             )
 
-            for i, frame_file in enumerate(frame_files):
-                if self._cancelled:
-                    raise InterruptedError("Pipeline cancelled by user")
-
-                frame_img = Image.open(frame_file).convert("RGB")
-                frame_arr = np.array(frame_img)
-
-                matte_arr = processor.process_frame(frame_arr)
-
-                # Save matte
-                matte_img = Image.fromarray(matte_arr, mode="L")
-                matte_img.save(mattes_dir / frame_file.name)
-
-                # Emit progress with preview and ETA
-                if i % 10 == 0 or i == total_frames - 1:
-                    elapsed = time.monotonic() - self._matte_start_time
-                    fps = (i + 1) / elapsed if elapsed > 0 else 0
-                    remaining = total_frames - (i + 1)
-                    eta = remaining / fps if fps > 0 else 0
-
-                    self._emit(PipelineProgress(
-                        stage="Generating mattes",
-                        stage_num=2,
-                        total_stages=self._total_stages(),
-                        frame_num=i + 1,
-                        total_frames=total_frames,
-                        source_frame=frame_arr,
-                        matte_frame=matte_arr,
-                        eta_sec=eta,
-                        fps=fps,
-                    ))
-
-            processor.cleanup()  # free GPU memory
+            if use_sbs:
+                self._run_sbs_matte_pass(
+                    config, frame_files, mattes_dir,
+                    total_frames,
+                )
+            else:
+                self._run_matte_pass(
+                    config, frame_files, mattes_dir,
+                    total_frames,
+                )
 
             # ── Stage 3: Reassemble matte video ──
             logger.info("Stage 3: Assembling matte video...")
@@ -293,6 +262,158 @@ class Pipeline:
                 total_stages=self._total_stages(),
             ))
             return output_path
+
+    def _make_processor(self, config, frame_files):
+        """Create a processor, handling MatAnyone 2 mask gen."""
+        first_frame = None
+        if config.model_variant == "matanyone2":
+            self._emit(PipelineProgress(
+                stage="Generating first-frame mask",
+                stage_num=2,
+                total_stages=self._total_stages(),
+            ))
+            first_img = Image.open(
+                frame_files[0]
+            ).convert("RGB")
+            first_frame = np.array(first_img)
+
+        return create_processor(
+            variant=config.model_variant,
+            downsample_ratio=config.downsample_ratio,
+            first_frame=first_frame,
+        )
+
+    def _run_matte_pass(
+        self, config, frame_files, mattes_dir,
+        total_frames,
+    ):
+        """Run matting on all frames (non-SBS path)."""
+        processor = self._make_processor(
+            config, frame_files
+        )
+
+        for i, frame_file in enumerate(frame_files):
+            if self._cancelled:
+                raise InterruptedError(
+                    "Pipeline cancelled by user"
+                )
+
+            frame_img = Image.open(
+                frame_file
+            ).convert("RGB")
+            frame_arr = np.array(frame_img)
+            matte_arr = processor.process_frame(frame_arr)
+
+            matte_img = Image.fromarray(matte_arr, mode="L")
+            matte_img.save(mattes_dir / frame_file.name)
+
+            self._emit_matte_progress(
+                i, total_frames, frame_arr, matte_arr
+            )
+
+        processor.cleanup()
+
+    def _run_sbs_matte_pass(
+        self, config, frame_files, mattes_dir,
+        total_frames,
+    ):
+        """Run per-eye matting on SBS stereo frames.
+
+        Splits each frame, mattes left eye first (all frames),
+        then right eye (all frames), merges results.
+        """
+        logger.info("SBS mode: processing per-eye")
+        # Read all frames and split
+        left_frames = []
+        right_frames = []
+        for ff in frame_files:
+            img = np.array(
+                Image.open(ff).convert("RGB")
+            )
+            left, right = split_frame(img)
+            left_frames.append(left)
+            right_frames.append(right)
+
+        # --- Left eye pass ---
+        logger.info("SBS: matting left eye...")
+        left_first = left_frames[0] if (
+            config.model_variant == "matanyone2"
+        ) else None
+        proc_l = create_processor(
+            variant=config.model_variant,
+            downsample_ratio=config.downsample_ratio,
+            first_frame=left_first,
+        )
+
+        left_mattes = []
+        for i, lf in enumerate(left_frames):
+            if self._cancelled:
+                raise InterruptedError(
+                    "Pipeline cancelled by user"
+                )
+            left_mattes.append(proc_l.process_frame(lf))
+            self._emit_matte_progress(
+                i, total_frames * 2,
+                merge_frames(lf, right_frames[i]),
+                None,
+                stage="Matting left eye",
+            )
+        proc_l.cleanup()
+
+        # --- Right eye pass ---
+        logger.info("SBS: matting right eye...")
+        right_first = right_frames[0] if (
+            config.model_variant == "matanyone2"
+        ) else None
+        proc_r = create_processor(
+            variant=config.model_variant,
+            downsample_ratio=config.downsample_ratio,
+            first_frame=right_first,
+        )
+
+        right_mattes = []
+        for i, rf in enumerate(right_frames):
+            if self._cancelled:
+                raise InterruptedError(
+                    "Pipeline cancelled by user"
+                )
+            right_mattes.append(proc_r.process_frame(rf))
+            self._emit_matte_progress(
+                total_frames + i, total_frames * 2,
+                merge_frames(left_frames[i], rf),
+                None,
+                stage="Matting right eye",
+            )
+        proc_r.cleanup()
+
+        # --- Merge and save ---
+        logger.info("SBS: merging per-eye mattes...")
+        for i, ff in enumerate(frame_files):
+            merged = merge_mattes(
+                left_mattes[i], right_mattes[i]
+            )
+            Image.fromarray(
+                merged, mode="L"
+            ).save(mattes_dir / ff.name)
+
+    def _emit_matte_progress(
+        self, i, total, source, matte,
+        stage="Generating mattes",
+    ):
+        """Emit progress during matting (every 10 frames)."""
+        if i % 10 != 0 and i != total - 1:
+            return
+        elapsed = time.monotonic() - self._matte_start_time
+        fps = (i + 1) / elapsed if elapsed > 0 else 0
+        remaining = total - (i + 1)
+        eta = remaining / fps if fps > 0 else 0
+        self._emit(PipelineProgress(
+            stage=stage, stage_num=2,
+            total_stages=self._total_stages(),
+            frame_num=i + 1, total_frames=total,
+            source_frame=source, matte_frame=matte,
+            eta_sec=eta, fps=fps,
+        ))
 
     def _copy_with_audio(self, video_path: Path,
                          audio_source: Path, output_path: Path) -> None:
