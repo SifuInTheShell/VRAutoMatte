@@ -64,6 +64,23 @@ VRAutoMatte — Qt-based desktop app for automated video matting and alpha chann
 - `uv sync` overwrites manually installed torch — must configure index in `pyproject.toml`
 - Bootstrap module runs before torch imports, uses env var `VRAUTOMATTE_TORCH_OK` to skip check on restart
 
+## Open Issues
+
+### CUDA OOM on 5800x2900 video (RTX 5080 16GB)
+```
+CUDA out of memory. Tried to allocate 4.09 GiB. GPU 0 has a total capacity of 15.92 GiB
+of which 0 bytes is free. Of the allocated memory 18.48 GiB is allocated by PyTorch, and
+4.62 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is
+large try setting PYTORCH_ALLOC_CONF=expandable_segments:True to avoid fragmentation.
+See documentation for Memory Management
+(https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+```
+- Occurs during matting of 5800x2900 content on RTX 5080 (16GB VRAM)
+- PyTorch allocated 18.48 GiB (exceeds 15.92 GiB capacity) + 4.62 GiB reserved but unused
+- TODO: investigate — likely need to lower downsample_ratio, process in tiles, or free SAM2 before matting
+- Try `PYTORCH_ALLOC_CONF=expandable_segments:True` as suggested by PyTorch
+- May need to reduce batch size or frame resolution before feeding to the model
+
 ## Features Added (2026-03-17)
 - **Custom temp directory:** UI setting with browse/reset buttons, persisted in settings.json, passed to `tempfile.TemporaryDirectory(dir=...)`
 - **Frame extraction progress:** Polls output directory every 0.5s, shows frame count, fps, and ETA in progress bar
