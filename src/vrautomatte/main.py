@@ -3,9 +3,6 @@
 import sys
 
 from loguru import logger
-from PySide6.QtWidgets import QApplication
-
-from vrautomatte.ui.main_window import MainWindow
 
 
 def main():
@@ -18,6 +15,13 @@ def main():
                       "<cyan>{message}</cyan>")
 
     logger.info("Starting VRAutoMatte...")
+
+    # Ensure correct PyTorch variant before importing torch-dependent modules
+    from vrautomatte.utils.bootstrap import ensure_correct_torch
+    ensure_correct_torch()
+
+    from PySide6.QtWidgets import QApplication
+    from vrautomatte.ui.main_window import MainWindow
 
     app = QApplication(sys.argv)
     app.setApplicationName("VRAutoMatte")

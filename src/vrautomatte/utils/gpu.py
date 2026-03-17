@@ -27,7 +27,7 @@ def get_device_info() -> dict:
     info = {"device": str(device), "name": "CPU"}
     if device.type == "cuda":
         info["name"] = torch.cuda.get_device_name(0)
-        mem = torch.cuda.get_device_properties(0).total_mem
+        mem = torch.cuda.get_device_properties(0).total_memory
         info["vram_gb"] = round(mem / (1024 ** 3), 1)
     elif device.type == "mps":
         info["name"] = "Apple Silicon (MPS)"
