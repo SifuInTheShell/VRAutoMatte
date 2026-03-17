@@ -72,6 +72,9 @@ class PipelineConfig:
     # SBS processing
     is_sbs: bool = False                 # Side-by-side stereo (per-eye)
 
+    # POV mode
+    pov_mode: bool = False               # Remove POV body + background
+
 
 @dataclass
 class PipelineProgress:
@@ -281,6 +284,7 @@ class Pipeline:
             variant=config.model_variant,
             downsample_ratio=config.downsample_ratio,
             first_frame=first_frame,
+            pov_mode=config.pov_mode,
         )
 
     def _run_matte_pass(
@@ -343,6 +347,7 @@ class Pipeline:
             variant=config.model_variant,
             downsample_ratio=config.downsample_ratio,
             first_frame=left_first,
+            pov_mode=config.pov_mode,
         )
 
         left_mattes = []
@@ -369,6 +374,7 @@ class Pipeline:
             variant=config.model_variant,
             downsample_ratio=config.downsample_ratio,
             first_frame=right_first,
+            pov_mode=config.pov_mode,
         )
 
         right_mattes = []
