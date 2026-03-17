@@ -341,6 +341,25 @@ class MainWindow(QMainWindow):
         self.vr_row_widget.setVisible(False)
         settings_layout.addWidget(self.vr_row_widget)
 
+        # Row 4: SBS stereo
+        sbs_row = QHBoxLayout()
+        from PySide6.QtWidgets import QCheckBox
+        self.sbs_check = QCheckBox(
+            "SBS Stereo (per-eye matting)"
+        )
+        self.sbs_check.setToolTip(
+            "Auto-detected for wide aspect ratios. "
+            "Override manually if needed."
+        )
+        sbs_row.addWidget(self.sbs_check)
+        self.sbs_auto_label = QLabel("")
+        self.sbs_auto_label.setStyleSheet(
+            "color: #6a9a6a; font-size: 11px;"
+        )
+        sbs_row.addWidget(self.sbs_auto_label)
+        sbs_row.addStretch()
+        settings_layout.addLayout(sbs_row)
+
         root.addWidget(settings_group)
 
         # ── Preview ──
@@ -424,6 +443,7 @@ class MainWindow(QMainWindow):
         )
         self.fov_slider.setValue(s.get("fisheye_fov", 180))
         self.codec_combo.setCurrentIndex(s.get("codec", 0))
+        self.sbs_check.setChecked(s.get("is_sbs", False))
         self.resize(
             s.get("window_width", 900),
             s.get("window_height", 780),
@@ -439,6 +459,7 @@ class MainWindow(QMainWindow):
             "projection": self.projection_combo.currentIndex(),
             "fisheye_fov": self.fov_slider.value(),
             "codec": self.codec_combo.currentIndex(),
+            "is_sbs": self.sbs_check.isChecked(),
             "window_width": self.width(),
             "window_height": self.height(),
         })
@@ -547,7 +568,7 @@ class MainWindow(QMainWindow):
         self.output_edit.setText(str(output))
 
     def _show_video_info(self, path: str):
-        """Display video metadata below the input field."""
+        """Display video metadata and auto-detect SBS."""
         try:
             info = get_video_info(path)
             self.info_label.setText(
@@ -557,8 +578,22 @@ class MainWindow(QMainWindow):
                 f"{info['duration']}s | "
                 f"{info['codec']}"
             )
+            # Auto-detect SBS
+            from vrautomatte.utils.sbs import detect_sbs
+            is_sbs = detect_sbs(
+                info["width"], info["height"]
+            )
+            self.sbs_check.setChecked(is_sbs)
+            if is_sbs:
+                self.sbs_auto_label.setText(
+                    "(auto-detected)"
+                )
+            else:
+                self.sbs_auto_label.setText("")
         except Exception:
-            self.info_label.setText("Could not read video info")
+            self.info_label.setText(
+                "Could not read video info"
+            )
 
     def _on_format_changed(self, index: int):
         self.vr_row_widget.setVisible(index == 1)
@@ -616,6 +651,7 @@ class MainWindow(QMainWindow):
                 self.downsample_combo.currentIndex(), 0.25
             ),
             crf=self.crf_slider.value(),
+            is_sbs=self.sbs_check.isChecked(),
         )
 
         if self.format_combo.currentIndex() == 1:
