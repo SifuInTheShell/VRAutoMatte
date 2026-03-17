@@ -174,6 +174,7 @@ def create_processor(
             variant=variant,
             downsample_ratio=downsample_ratio,
             device=device,
+            use_fp16=use_fp16,
         )
 
         if pov_mode and first_frame is not None:

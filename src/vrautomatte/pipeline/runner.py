@@ -63,7 +63,7 @@ class PipelineConfig:
 
     # Matting settings
     model_variant: str = "mobilenetv3"   # mobilenetv3/resnet50/matanyone2
-    downsample_ratio: float = 0.25       # RVM processing scale
+    downsample_ratio: float = 0.125      # RVM processing scale — 0.25 for HD, 0.125 for 4K/8K SBS
 
     # Output settings
     output_format: OutputFormat = OutputFormat.MATTE_ONLY
