@@ -267,9 +267,13 @@ class Pipeline:
             return output_path
 
     def _make_processor(self, config, frame_files):
-        """Create a processor, handling MatAnyone 2 mask gen."""
+        """Create a processor, handling mask gen if needed."""
         first_frame = None
-        if config.model_variant == "matanyone2":
+        needs_first_frame = (
+            config.model_variant == "matanyone2"
+            or config.pov_mode
+        )
+        if needs_first_frame:
             self._emit(PipelineProgress(
                 stage="Generating first-frame mask",
                 stage_num=2,
@@ -340,9 +344,11 @@ class Pipeline:
 
         # --- Left eye pass ---
         logger.info("SBS: matting left eye...")
-        left_first = left_frames[0] if (
+        needs_first = (
             config.model_variant == "matanyone2"
-        ) else None
+            or config.pov_mode
+        )
+        left_first = left_frames[0] if needs_first else None
         proc_l = create_processor(
             variant=config.model_variant,
             downsample_ratio=config.downsample_ratio,
@@ -367,9 +373,9 @@ class Pipeline:
 
         # --- Right eye pass ---
         logger.info("SBS: matting right eye...")
-        right_first = right_frames[0] if (
-            config.model_variant == "matanyone2"
-        ) else None
+        right_first = (
+            right_frames[0] if needs_first else None
+        )
         proc_r = create_processor(
             variant=config.model_variant,
             downsample_ratio=config.downsample_ratio,
