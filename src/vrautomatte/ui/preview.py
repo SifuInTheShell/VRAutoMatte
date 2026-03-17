@@ -12,51 +12,44 @@ from PySide6.QtWidgets import (
 )
 
 
-def _numpy_to_pixmap(arr: np.ndarray, max_width: int = 400) -> QPixmap:
-    """Convert a numpy array (RGB or grayscale) to a QPixmap.
-
-    Args:
-        arr: Image array — (H, W, 3) for RGB or (H, W) for grayscale.
-        max_width: Scale down to this max width for display.
-
-    Returns:
-        QPixmap ready for display.
-    """
+def _numpy_to_pixmap(
+    arr: np.ndarray, max_width: int = 400
+) -> QPixmap:
+    """Convert a numpy array to a QPixmap for display."""
     if arr is None:
         return QPixmap()
 
-    # Ensure contiguous memory layout
     arr = np.ascontiguousarray(arr)
-
     if arr.ndim == 2:
-        # Grayscale → RGB for display
         arr = np.stack([arr, arr, arr], axis=-1)
         arr = np.ascontiguousarray(arr)
 
     h, w, c = arr.shape
     bytes_per_line = w * c
     qimg = QImage(
-        arr.data, w, h, bytes_per_line, QImage.Format.Format_RGB888
+        arr.data, w, h, bytes_per_line,
+        QImage.Format.Format_RGB888,
     )
     pixmap = QPixmap.fromImage(qimg)
 
     if w > max_width:
         pixmap = pixmap.scaledToWidth(
-            max_width, Qt.TransformationMode.SmoothTransformation
+            max_width,
+            Qt.TransformationMode.SmoothTransformation,
         )
     return pixmap
 
 
-class PreviewWidget(QWidget):
-    """Dual-pane preview showing source frame and matte side by side.
+_MONO = (
+    "font-family: 'Cascadia Code', 'Consolas', monospace;"
+)
 
-    Features:
-    - Source frame on the left, generated matte on the right
-    - Frame counter with scrubber slider
-    - ETA and FPS display during processing
+
+class PreviewWidget(QWidget):
+    """Dual-pane preview: source frame and matte side by side.
 
     Signals:
-        frame_scrubbed: Emitted when user drags the scrubber (frame_num).
+        frame_scrubbed: Emitted when user drags the scrubber.
     """
 
     frame_scrubbed = Signal(int)
@@ -73,20 +66,10 @@ class PreviewWidget(QWidget):
 
         # Header row
         header_row = QHBoxLayout()
-        header = QLabel("Preview")
-        header.setStyleSheet(
-            "font-weight: 700; font-size: 12px; "
-            "letter-spacing: 0.5px; text-transform: uppercase; "
-            "color: #4a7888;"
-        )
-        header_row.addWidget(header)
+        self._header = QLabel("Preview")
+        header_row.addWidget(self._header)
         header_row.addStretch()
         self.perf_label = QLabel("")
-        self.perf_label.setStyleSheet(
-            "color: #2a8878; font-size: 12px; "
-            "font-family: 'Cascadia Code', 'Consolas', monospace; "
-            "font-weight: 600;"
-        )
         header_row.addWidget(self.perf_label)
         layout.addLayout(header_row)
 
@@ -94,43 +77,31 @@ class PreviewWidget(QWidget):
         pane_layout = QHBoxLayout()
         pane_layout.setSpacing(8)
 
-        # Source pane
         source_pane = QVBoxLayout()
-        source_header = QLabel("Source")
-        source_header.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        source_header.setStyleSheet(
-            "color: #5a8898; font-size: 10px; font-weight: 700; "
-            "letter-spacing: 1px; text-transform: uppercase;"
+        self._source_header = QLabel("Source")
+        self._source_header.setAlignment(
+            Qt.AlignmentFlag.AlignCenter
         )
-        source_pane.addWidget(source_header)
+        source_pane.addWidget(self._source_header)
         self.source_label = QLabel()
-        self.source_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.source_label.setMinimumSize(320, 180)
-        self.source_label.setStyleSheet(
-            "background-color: #dcdee6; "
-            "border: 1px solid #c0c4d0; "
-            "border-radius: 8px;"
+        self.source_label.setAlignment(
+            Qt.AlignmentFlag.AlignCenter
         )
+        self.source_label.setMinimumSize(320, 180)
         source_pane.addWidget(self.source_label)
         pane_layout.addLayout(source_pane)
 
-        # Matte pane
         matte_pane = QVBoxLayout()
-        matte_header = QLabel("Matte")
-        matte_header.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        matte_header.setStyleSheet(
-            "color: #5a8898; font-size: 10px; font-weight: 700; "
-            "letter-spacing: 1px; text-transform: uppercase;"
+        self._matte_header = QLabel("Matte")
+        self._matte_header.setAlignment(
+            Qt.AlignmentFlag.AlignCenter
         )
-        matte_pane.addWidget(matte_header)
+        matte_pane.addWidget(self._matte_header)
         self.matte_label = QLabel()
-        self.matte_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.matte_label.setMinimumSize(320, 180)
-        self.matte_label.setStyleSheet(
-            "background-color: #dcdee6; "
-            "border: 1px solid #c0c4d0; "
-            "border-radius: 8px;"
+        self.matte_label.setAlignment(
+            Qt.AlignmentFlag.AlignCenter
         )
+        self.matte_label.setMinimumSize(320, 180)
         matte_pane.addWidget(self.matte_label)
         pane_layout.addLayout(matte_pane)
 
@@ -142,10 +113,6 @@ class PreviewWidget(QWidget):
 
         self.frame_label = QLabel("—")
         self.frame_label.setFixedWidth(130)
-        self.frame_label.setStyleSheet(
-            "color: #607080; font-size: 11px; "
-            "font-family: 'Cascadia Code', 'Consolas', monospace;"
-        )
         scrubber_row.addWidget(self.frame_label)
 
         self.scrubber = QSlider(Qt.Orientation.Horizontal)
@@ -156,17 +123,54 @@ class PreviewWidget(QWidget):
 
         self.eta_label = QLabel("")
         self.eta_label.setFixedWidth(150)
-        self.eta_label.setAlignment(Qt.AlignmentFlag.AlignRight)
-        self.eta_label.setStyleSheet(
-            "color: #607080; font-size: 11px; "
-            "font-family: 'Cascadia Code', 'Consolas', monospace;"
+        self.eta_label.setAlignment(
+            Qt.AlignmentFlag.AlignRight
         )
         scrubber_row.addWidget(self.eta_label)
 
         layout.addLayout(scrubber_row)
 
+    def apply_colors(self, c: dict) -> None:
+        """Apply theme colors to all inline-styled widgets.
+
+        Args:
+            c: Color map from themes.py (LIGHT_COLORS or
+               DARK_COLORS).
+        """
+        self._header.setStyleSheet(
+            f"font-weight: 700; font-size: 12px; "
+            f"letter-spacing: 0.5px; "
+            f"text-transform: uppercase; "
+            f"color: {c['preview_header']};"
+        )
+        self.perf_label.setStyleSheet(
+            f"color: {c['preview_perf']}; font-size: 12px; "
+            f"{_MONO} font-weight: 600;"
+        )
+        pane_hdr = (
+            f"font-size: 10px; font-weight: 700; "
+            f"letter-spacing: 1px; text-transform: uppercase; "
+            f"color: {c['preview_pane_header']};"
+        )
+        self._source_header.setStyleSheet(pane_hdr)
+        self._matte_header.setStyleSheet(pane_hdr)
+
+        pane_bg = (
+            f"background-color: {c['preview_pane_bg']}; "
+            f"border: 1px solid {c['preview_pane_border']}; "
+            f"border-radius: 8px;"
+        )
+        self.source_label.setStyleSheet(pane_bg)
+        self.matte_label.setStyleSheet(pane_bg)
+
+        mono_lbl = (
+            f"color: {c['preview_mono']}; "
+            f"font-size: 11px; {_MONO}"
+        )
+        self.frame_label.setStyleSheet(mono_lbl)
+        self.eta_label.setStyleSheet(mono_lbl)
+
     def _on_scrub(self, value: int):
-        """Handle scrubber drag."""
         self.frame_scrubbed.emit(value)
 
     def update_preview(
@@ -179,57 +183,40 @@ class PreviewWidget(QWidget):
         fps: float = 0.0,
         elapsed_sec: float = 0.0,
     ) -> None:
-        """Update the preview with new frame data.
-
-        Args:
-            source_frame: RGB numpy array (H, W, 3) or None.
-            matte_frame: Grayscale numpy array (H, W) or None.
-            frame_num: Current frame number (1-based).
-            total_frames: Total number of frames.
-            eta_sec: Estimated time remaining in seconds.
-            fps: Current processing frames per second.
-            elapsed_sec: Total elapsed time in seconds.
-        """
+        """Update the preview with new frame data."""
         if source_frame is not None:
-            pixmap = _numpy_to_pixmap(source_frame)
-            self.source_label.setPixmap(pixmap)
-
+            self.source_label.setPixmap(
+                _numpy_to_pixmap(source_frame)
+            )
         if matte_frame is not None:
-            pixmap = _numpy_to_pixmap(matte_frame)
-            self.matte_label.setPixmap(pixmap)
-
+            self.matte_label.setPixmap(
+                _numpy_to_pixmap(matte_frame)
+            )
         if total_frames > 0:
             self._total_frames = total_frames
             self.frame_label.setText(
                 f"Frame {frame_num:,} / {total_frames:,}"
             )
-            # Update scrubber position without triggering signal
             self.scrubber.blockSignals(True)
             self.scrubber.setRange(1, total_frames)
             self.scrubber.setValue(frame_num)
             self.scrubber.blockSignals(False)
 
-        # ETA display
         if eta_sec > 0:
-            eta_str = _format_time(eta_sec)
-            self.eta_label.setText(f"ETA: {eta_str}")
+            self.eta_label.setText(
+                f"ETA: {_format_time(eta_sec)}"
+            )
         elif elapsed_sec > 0:
             self.eta_label.setText(
                 f"Elapsed: {_format_time(elapsed_sec)}"
             )
-
-        # FPS display
         if fps > 0:
             self.perf_label.setText(f"{fps:.1f} fps")
 
-    def set_scrubber_enabled(self, enabled: bool,
-                             total_frames: int = 0) -> None:
-        """Enable or disable the scrubber for manual seeking.
-
-        Args:
-            enabled: Whether scrubber is interactive.
-            total_frames: Total frame count for the range.
-        """
+    def set_scrubber_enabled(
+        self, enabled: bool, total_frames: int = 0
+    ) -> None:
+        """Enable/disable scrubber for manual seeking."""
         self.scrubber.setEnabled(enabled)
         if total_frames > 0:
             self.scrubber.setRange(1, total_frames)
@@ -249,14 +236,7 @@ class PreviewWidget(QWidget):
 
 
 def _format_time(seconds: float) -> str:
-    """Format seconds into human-readable time string.
-
-    Args:
-        seconds: Time in seconds.
-
-    Returns:
-        Formatted string like '2m 34s' or '1h 12m'.
-    """
+    """Format seconds into human-readable time string."""
     if seconds < 0:
         return "—"
     seconds = int(seconds)
