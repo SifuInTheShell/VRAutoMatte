@@ -9,7 +9,7 @@ _SETTINGS_DIR = Path.home() / ".config" / "vrautomatte"
 _SETTINGS_FILE = _SETTINGS_DIR / "settings.json"
 
 _DEFAULTS = {
-    "model_variant": 0,          # 0=mobilenetv3, 1=resnet50
+    "model_variant": 0,          # 0=mobilenetv3, 1=resnet50, 2=matanyone2
     "downsample_ratio": 1,       # combo index
     "crf": 18,
     "output_format": 0,          # 0=matte only, 1=deovr alpha
