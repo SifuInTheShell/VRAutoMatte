@@ -1,8 +1,15 @@
-"""Worker thread for running the pipeline without blocking the GUI."""
+"""Worker threads for pipeline execution and dependency installation."""
+
+import subprocess
+import sys
 
 from PySide6.QtCore import QThread, Signal
 
-from vrautomatte.pipeline.runner import Pipeline, PipelineConfig, PipelineProgress
+from vrautomatte.pipeline.runner import (
+    Pipeline,
+    PipelineConfig,
+    PipelineProgress,
+)
 
 
 class PipelineWorker(QThread):
@@ -45,3 +52,57 @@ class PipelineWorker(QThread):
     def _on_progress(self, p: PipelineProgress):
         """Forward progress from the pipeline to the GUI thread."""
         self.progress.emit(p)
+
+
+class InstallWorker(QThread):
+    """Install optional dependencies in a background thread.
+
+    Runs `uv sync --extra matanyone2` (or pip fallback)
+    and streams output line-by-line.
+
+    Signals:
+        output: Emitted per line of install output.
+        finished: Emitted with True on success, False on failure.
+    """
+
+    output = Signal(str)
+    finished = Signal(bool)
+
+    def run(self):
+        """Run the install command."""
+        try:
+            cmd = self._build_command()
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+            for line in process.stdout:
+                self.output.emit(line.rstrip())
+            process.wait()
+            self.finished.emit(process.returncode == 0)
+        except Exception as e:
+            self.output.emit(f"Install failed: {e}")
+            self.finished.emit(False)
+
+    @staticmethod
+    def _build_command() -> list[str]:
+        """Build the install command, preferring uv."""
+        try:
+            subprocess.run(
+                ["uv", "--version"],
+                capture_output=True, check=True,
+            )
+            return [
+                "uv", "sync",
+                "--extra", "matanyone2",
+            ]
+        except (FileNotFoundError, subprocess.CalledProcessError):
+            return [
+                sys.executable, "-m", "pip", "install",
+                "matanyone2 @ git+https://github.com/"
+                "pq-yang/MatAnyone2.git",
+                "sam2>=1.0",
+            ]
