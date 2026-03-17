@@ -52,7 +52,7 @@ This milestone is complete only when all are true:
 
 ## Slices
 
-- [ ] **S01: MatAnyone 2 + SAM2 Integration** `risk:high` `depends:[]`
+- [x] **S01: MatAnyone 2 + SAM2 Integration** `risk:high` `depends:[]`
   > After this: user selects "MatAnyone 2" from model dropdown, hits Start, video is auto-matted with higher edge quality than RVM — works on both GPU and CPU
 
 - [ ] **S02: SBS Stereo Per-Eye Processing** `risk:medium` `depends:[]`
