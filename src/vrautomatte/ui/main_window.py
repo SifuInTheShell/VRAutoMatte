@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+import numpy as np
+from PIL import Image
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -201,6 +203,7 @@ class MainWindow(QMainWindow):
         self._batch_queue: list[dict] = []
         self._batch_index = 0
         self._settings = load_settings()
+        self._video_info: dict | None = None
         self._setup_ui()
         self._restore_settings()
         self._update_device_label()
@@ -364,6 +367,9 @@ class MainWindow(QMainWindow):
 
         # ── Preview ──
         self.preview = PreviewWidget()
+        self.preview.frame_scrubbed.connect(
+            self._on_frame_scrubbed
+        )
         root.addWidget(self.preview, stretch=1)
 
         # ── Batch Queue (collapsible) ──
@@ -590,6 +596,12 @@ class MainWindow(QMainWindow):
                 )
             else:
                 self.sbs_auto_label.setText("")
+
+            # Enable scrubber for seek
+            self.preview.set_scrubber_enabled(
+                True, info["num_frames"]
+            )
+            self._video_info = info
         except Exception:
             self.info_label.setText(
                 "Could not read video info"
@@ -599,6 +611,35 @@ class MainWindow(QMainWindow):
         self.vr_row_widget.setVisible(index == 1)
         if self.input_edit.text():
             self._auto_output_name(self.input_edit.text())
+
+    def _on_frame_scrubbed(self, frame_num: int):
+        """Handle scrubber seek — extract and show source frame."""
+        input_path = self.input_edit.text()
+        if not input_path or not self._video_info:
+            return
+
+        try:
+            import tempfile
+            from vrautomatte.utils.ffmpeg import extract_frame
+
+            with tempfile.NamedTemporaryFile(
+                suffix=".png", delete=False
+            ) as tmp:
+                tmp_path = tmp.name
+
+            extract_frame(input_path, frame_num - 1, tmp_path)
+            frame_img = Image.open(tmp_path).convert("RGB")
+            frame_arr = np.array(frame_img)
+            self.preview.update_preview(
+                source_frame=frame_arr,
+                frame_num=frame_num,
+                total_frames=self._video_info["num_frames"],
+            )
+
+            import os
+            os.unlink(tmp_path)
+        except Exception as e:
+            logger.debug(f"Scrubber seek failed: {e}")
 
     def _update_crf_label(self, value: int):
         self.crf_label.setText(str(value))
