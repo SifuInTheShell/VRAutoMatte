@@ -51,6 +51,16 @@ from vrautomatte.utils.settings import load_settings, save_settings
 
 
 
+def _check_matanyone2() -> bool:
+    """Check if MatAnyone 2 + SAM2 dependencies are installed."""
+    try:
+        import sam2  # noqa: F401
+        import matanyone2  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
 class MainWindow(QMainWindow):
     """Main application window.
 
@@ -138,11 +148,17 @@ class MainWindow(QMainWindow):
         row1 = QHBoxLayout()
         row1.addWidget(QLabel("Matting Model:"))
         self.model_combo = QComboBox()
+        self._ma2_available = _check_matanyone2()
         self.model_combo.addItems([
             "mobilenetv3 (fast)",
             "resnet50 (quality)",
-            "MatAnyone 2 (quality+)",
+            "MatAnyone 2 (quality+)"
+            if self._ma2_available
+            else "MatAnyone 2 ⛔ not installed",
         ])
+        if not self._ma2_available:
+            # Grey out the MatAnyone 2 option
+            self.model_combo.model().item(2).setEnabled(False)
         row1.addWidget(self.model_combo)
         row1.addSpacing(20)
         row1.addWidget(QLabel("Output Format:"))
@@ -326,7 +342,10 @@ class MainWindow(QMainWindow):
     def _restore_settings(self):
         """Restore saved settings to the UI widgets."""
         s = self._settings
-        self.model_combo.setCurrentIndex(s.get("model_variant", 0))
+        model_idx = s.get("model_variant", 0)
+        if model_idx == 2 and not self._ma2_available:
+            model_idx = 0  # Fall back if MA2 uninstalled
+        self.model_combo.setCurrentIndex(model_idx)
         self.downsample_combo.setCurrentIndex(
             s.get("downsample_ratio", 1)
         )
@@ -774,6 +793,26 @@ class MainWindow(QMainWindow):
             return
         if not check_ffmpeg():
             self._show_ffmpeg_error()
+            return
+
+        # Check sam2 availability for features that need it
+        needs_sam2 = (
+            self.model_combo.currentIndex() == 2
+            or self.pov_check.isChecked()
+        )
+        if needs_sam2 and not self._ma2_available:
+            feature = (
+                "MatAnyone 2"
+                if self.model_combo.currentIndex() == 2
+                else "POV mode"
+            )
+            QMessageBox.warning(
+                self, "Missing Dependencies",
+                f"{feature} requires SAM2 which is not "
+                f"installed.\n\n"
+                f"Install with:\n"
+                f"  uv sync --extra matanyone2",
+            )
             return
 
         config = self._build_config()
