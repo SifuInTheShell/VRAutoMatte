@@ -77,13 +77,13 @@ class PreviewWidget(QWidget):
         header.setStyleSheet(
             "font-weight: 700; font-size: 12px; "
             "letter-spacing: 0.5px; text-transform: uppercase; "
-            "color: #5a7a8a;"
+            "color: #8aaaba;"
         )
         header_row.addWidget(header)
         header_row.addStretch()
         self.perf_label = QLabel("")
         self.perf_label.setStyleSheet(
-            "color: #3a9a8a; font-size: 12px; "
+            "color: #50c0b0; font-size: 12px; "
             "font-family: 'Cascadia Code', 'Consolas', monospace; "
             "font-weight: 600;"
         )
@@ -99,7 +99,7 @@ class PreviewWidget(QWidget):
         source_header = QLabel("Source")
         source_header.setAlignment(Qt.AlignmentFlag.AlignCenter)
         source_header.setStyleSheet(
-            "color: #4a6a7a; font-size: 10px; font-weight: 700; "
+            "color: #6a9aaa; font-size: 10px; font-weight: 700; "
             "letter-spacing: 1px; text-transform: uppercase;"
         )
         source_pane.addWidget(source_header)
@@ -107,8 +107,8 @@ class PreviewWidget(QWidget):
         self.source_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.source_label.setMinimumSize(320, 180)
         self.source_label.setStyleSheet(
-            "background-color: #0a0a12; "
-            "border: 1px solid #1a1a28; "
+            "background-color: #161820; "
+            "border: 1px solid #2a2c38; "
             "border-radius: 8px;"
         )
         source_pane.addWidget(self.source_label)
@@ -119,7 +119,7 @@ class PreviewWidget(QWidget):
         matte_header = QLabel("Matte")
         matte_header.setAlignment(Qt.AlignmentFlag.AlignCenter)
         matte_header.setStyleSheet(
-            "color: #4a6a7a; font-size: 10px; font-weight: 700; "
+            "color: #6a9aaa; font-size: 10px; font-weight: 700; "
             "letter-spacing: 1px; text-transform: uppercase;"
         )
         matte_pane.addWidget(matte_header)
@@ -127,8 +127,8 @@ class PreviewWidget(QWidget):
         self.matte_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.matte_label.setMinimumSize(320, 180)
         self.matte_label.setStyleSheet(
-            "background-color: #0a0a12; "
-            "border: 1px solid #1a1a28; "
+            "background-color: #161820; "
+            "border: 1px solid #2a2c38; "
             "border-radius: 8px;"
         )
         matte_pane.addWidget(self.matte_label)
@@ -143,7 +143,7 @@ class PreviewWidget(QWidget):
         self.frame_label = QLabel("—")
         self.frame_label.setFixedWidth(130)
         self.frame_label.setStyleSheet(
-            "color: #5a6a7a; font-size: 11px; "
+            "color: #8090a0; font-size: 11px; "
             "font-family: 'Cascadia Code', 'Consolas', monospace;"
         )
         scrubber_row.addWidget(self.frame_label)
@@ -158,7 +158,7 @@ class PreviewWidget(QWidget):
         self.eta_label.setFixedWidth(150)
         self.eta_label.setAlignment(Qt.AlignmentFlag.AlignRight)
         self.eta_label.setStyleSheet(
-            "color: #5a6a7a; font-size: 11px; "
+            "color: #8090a0; font-size: 11px; "
             "font-family: 'Cascadia Code', 'Consolas', monospace;"
         )
         scrubber_row.addWidget(self.eta_label)
