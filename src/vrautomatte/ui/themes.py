@@ -136,8 +136,9 @@ QScrollBar::handle:horizontal {
 }
 QToolTip {
     border-radius: 4px;
-    padding: 6px 10px;
+    padding: 8px 12px;
     font-size: 12px;
+    max-width: 380px;
 }
 QSplitter::handle {
     width: 2px;

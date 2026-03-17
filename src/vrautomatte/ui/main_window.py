@@ -182,7 +182,18 @@ class MainWindow(QMainWindow):
 
         # Row 1: Model + Output Format
         row1 = QHBoxLayout()
-        row1.addWidget(QLabel("Matting Model:"))
+        model_label = QLabel("Matting Model:")
+        model_label.setToolTip(
+            "AI model used for person segmentation.\n\n"
+            "• mobilenetv3 — Fastest, good for previewing "
+            "and lower-end GPUs (~50 fps at 1080p)\n"
+            "• resnet50 — Better edge quality, slightly "
+            "slower (~30 fps at 1080p)\n"
+            "• MatAnyone 2 — Best quality, CVPR 2026 SOTA. "
+            "Sharpest edges, best hair/transparency "
+            "(~8 fps at 1080p, needs ~6 GB VRAM)"
+        )
+        row1.addWidget(model_label)
         self.model_combo = QComboBox()
         self._ma2_available = _check_matanyone2()
         self.model_combo.addItems([
@@ -192,13 +203,26 @@ class MainWindow(QMainWindow):
             if self._ma2_available
             else "MatAnyone 2 — click to install",
         ])
+        self.model_combo.setToolTip(model_label.toolTip())
         self.model_combo.currentIndexChanged.connect(
             self._on_model_changed
         )
         row1.addWidget(self.model_combo)
         row1.addSpacing(20)
-        row1.addWidget(QLabel("Output Format:"))
+        format_label = QLabel("Output Format:")
+        format_label.setToolTip(
+            "What the pipeline produces.\n\n"
+            "• Matte Only — Grayscale alpha matte video. "
+            "White = person, black = background. "
+            "Use for compositing in video editors.\n"
+            "• DeoVR Alpha Pack — Full passthrough pipeline "
+            "for Meta Quest. Converts to fisheye, packs "
+            "video + red-channel matte vertically. "
+            "Output filename gets _ALPHA suffix."
+        )
+        row1.addWidget(format_label)
         self.format_combo = QComboBox()
+        self.format_combo.setToolTip(format_label.toolTip())
         self.format_combo.addItems([
             "Matte Only", "DeoVR Alpha Pack"
         ])
@@ -211,7 +235,17 @@ class MainWindow(QMainWindow):
 
         # Row 2: Quality (CRF) slider + Downsample
         row2 = QHBoxLayout()
-        row2.addWidget(QLabel("Quality (CRF):"))
+        crf_label = QLabel("Quality (CRF):")
+        crf_label.setToolTip(
+            "Constant Rate Factor — controls output video "
+            "quality vs file size.\n\n"
+            "• 10–14: Visually lossless, large files\n"
+            "• 15–19: High quality, good balance (default: 18)\n"
+            "• 20–25: Medium quality, smaller files\n"
+            "• 26–30: Lower quality, smallest files\n\n"
+            "Lower number = better quality = bigger file."
+        )
+        row2.addWidget(crf_label)
         self.crf_slider = QSlider(Qt.Orientation.Horizontal)
         self.crf_slider.setRange(10, 30)
         self.crf_slider.setValue(18)
@@ -219,18 +253,33 @@ class MainWindow(QMainWindow):
         self.crf_slider.setTickPosition(
             QSlider.TickPosition.TicksBelow
         )
+        self.crf_slider.setToolTip(crf_label.toolTip())
         self.crf_slider.valueChanged.connect(self._update_crf_label)
         row2.addWidget(self.crf_slider)
         self.crf_label = QLabel("18")
         self.crf_label.setFixedWidth(30)
         row2.addWidget(self.crf_label)
         row2.addSpacing(20)
-        row2.addWidget(QLabel("Downsample:"))
+        ds_label = QLabel("Downsample:")
+        ds_label.setToolTip(
+            "Processing resolution for RVM models. "
+            "Lower = faster but less precise edges.\n\n"
+            "• 0.125 — Fastest, roughest edges. Good for "
+            "quick previews.\n"
+            "• 0.25 — Balanced speed and quality (default). "
+            "Recommended for most use.\n"
+            "• 0.5 — Higher quality edges, 2× slower.\n"
+            "• 1.0 — Full resolution, best edges but "
+            "slowest and most VRAM.\n\n"
+            "Has no effect on MatAnyone 2 (always full res)."
+        )
+        row2.addWidget(ds_label)
         self.downsample_combo = QComboBox()
         self.downsample_combo.addItems([
             "0.125 (fastest)", "0.25 (balanced)",
             "0.5 (quality)", "1.0 (full res)",
         ])
+        self.downsample_combo.setToolTip(ds_label.toolTip())
         self.downsample_combo.setCurrentIndex(1)
         row2.addWidget(self.downsample_combo)
         row2.addStretch()
@@ -240,26 +289,61 @@ class MainWindow(QMainWindow):
         self.vr_row_widget = QWidget()
         vr_row = QHBoxLayout(self.vr_row_widget)
         vr_row.setContentsMargins(0, 0, 0, 0)
-        vr_row.addWidget(QLabel("Projection:"))
+        proj_label = QLabel("Projection:")
+        proj_label.setToolTip(
+            "Input video projection type.\n\n"
+            "• Equirectangular → Fisheye — Standard 360° "
+            "VR video. Will be converted to fisheye for "
+            "DeoVR passthrough.\n"
+            "• Already Fisheye — Input is already in "
+            "fisheye format. Skips conversion step."
+        )
+        vr_row.addWidget(proj_label)
         self.projection_combo = QComboBox()
         self.projection_combo.addItems([
             "Equirectangular → Fisheye", "Already Fisheye"
         ])
+        self.projection_combo.setToolTip(
+            proj_label.toolTip()
+        )
         vr_row.addWidget(self.projection_combo)
         vr_row.addSpacing(20)
-        vr_row.addWidget(QLabel("Fisheye FOV:"))
+        fov_label_text = QLabel("Fisheye FOV:")
+        fov_label_text.setToolTip(
+            "Field of view for the fisheye projection.\n\n"
+            "• 180° — Standard hemisphere\n"
+            "• 190° — Slight over-capture (default for "
+            "most VR cameras)\n"
+            "• 200°+ — Ultra-wide, may distort edges\n\n"
+            "Match this to your camera's actual FOV "
+            "for best results."
+        )
+        vr_row.addWidget(fov_label_text)
         self.fov_slider = QSlider(Qt.Orientation.Horizontal)
         self.fov_slider.setRange(170, 210)
         self.fov_slider.setValue(180)
+        self.fov_slider.setToolTip(
+            fov_label_text.toolTip()
+        )
         self.fov_slider.valueChanged.connect(self._update_fov_label)
         vr_row.addWidget(self.fov_slider)
         self.fov_label = QLabel("180°")
         self.fov_label.setFixedWidth(35)
         vr_row.addWidget(self.fov_label)
         vr_row.addSpacing(20)
-        vr_row.addWidget(QLabel("Codec:"))
+        codec_label = QLabel("Codec:")
+        codec_label.setToolTip(
+            "Video codec for the output file.\n\n"
+            "• HEVC (H.265) — Better compression, smaller "
+            "files. Recommended for Quest. Requires "
+            "hardware decoder support.\n"
+            "• H.264 — Wider compatibility, slightly "
+            "larger files. Use if HEVC playback fails."
+        )
+        vr_row.addWidget(codec_label)
         self.codec_combo = QComboBox()
         self.codec_combo.addItems(["HEVC (H.265)", "H.264"])
+        self.codec_combo.setToolTip(codec_label.toolTip())
         vr_row.addWidget(self.codec_combo)
         vr_row.addStretch()
         self.vr_row_widget.setVisible(False)
@@ -271,8 +355,13 @@ class MainWindow(QMainWindow):
             "SBS Stereo (per-eye matting)"
         )
         self.sbs_check.setToolTip(
-            "Auto-detected for wide aspect ratios. "
-            "Override manually if needed."
+            "Process each eye independently for side-by-side "
+            "stereo VR videos.\n\n"
+            "Auto-detected when aspect ratio ≥ 1.9:1 "
+            "(e.g. 3840×1920).\n"
+            "Each eye gets its own matting pass for better "
+            "quality at stereo boundaries.\n"
+            "Override manually if auto-detection is wrong."
         )
         sbs_row.addWidget(self.sbs_check)
         self.sbs_auto_label = QLabel("")
@@ -280,10 +369,16 @@ class MainWindow(QMainWindow):
         sbs_row.addSpacing(20)
         self.pov_check = QCheckBox("POV Mode")
         self.pov_check.setToolTip(
-            "Remove POV body and background — keep only "
-            "the other person.\n"
-            "• MatAnyone 2: best quality (instance matting)\n"
-            "• RVM: fast but rough (static mask subtraction)"
+            "For first-person VR content where the camera "
+            "operator's body is visible.\n\n"
+            "SAM2 detects the operator's body on the first "
+            "frame and excludes it from the matte — only "
+            "other people are kept.\n\n"
+            "• MatAnyone 2: Best quality (instance-level "
+            "matting, re-runs SAM2 on scene changes)\n"
+            "• RVM: Fast mode (static mask subtraction, "
+            "rougher but much faster)\n\n"
+            "Requires SAM2 (installed with MatAnyone 2)."
         )
         self.pov_check.stateChanged.connect(
             self._update_pov_warning
