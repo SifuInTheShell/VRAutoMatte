@@ -87,22 +87,30 @@ class InstallWorker(QThread):
             self.output.emit(f"Install failed: {e}")
             self.finished.emit(False)
 
+    _PACKAGES = [
+        "matanyone2 @ git+https://github.com/pq-yang/MatAnyone2.git",
+        "sam2>=1.0",
+    ]
+
     @staticmethod
     def _build_command() -> list[str]:
-        """Build the install command, preferring uv."""
+        """Build the install command, preferring uv.
+
+        Uses ``uv pip install`` instead of ``uv sync`` so that
+        already-loaded DLLs (numpy, torch, etc.) are not replaced
+        while the application is running.
+        """
         try:
             subprocess.run(
                 ["uv", "--version"],
                 capture_output=True, check=True,
             )
             return [
-                "uv", "sync",
-                "--extra", "matanyone2",
+                "uv", "pip", "install",
+                *InstallWorker._PACKAGES,
             ]
         except (FileNotFoundError, subprocess.CalledProcessError):
             return [
                 sys.executable, "-m", "pip", "install",
-                "matanyone2 @ git+https://github.com/"
-                "pq-yang/MatAnyone2.git",
-                "sam2>=1.0",
+                *InstallWorker._PACKAGES,
             ]
