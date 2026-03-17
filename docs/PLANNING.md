@@ -2,28 +2,63 @@
 
 ## Vision
 
-Automated video matting and chroma keying for VR content. Streamline the process of separating foreground subjects from backgrounds in VR/360° video workflows.
+Automated video matting and alpha channel generation for VR passthrough content.
+Take any VR video, use AI to separate human person(s) from the background,
+and produce a file ready for DeoVR passthrough playback on Quest headsets.
 
-## Open Questions
+## Decisions Made
 
-- [ ] What VR video formats need to be supported? (equirectangular, cubemap, stereo, etc.)
-- [ ] Real-time processing or offline/batch?
-- [ ] Target platforms? (desktop, cloud, plugin for existing tools)
-- [ ] AI-based matting (deep learning) vs traditional chroma key vs hybrid?
-- [ ] Programming language and framework selection
-- [ ] Input/output pipeline (file-based, streaming, API)
+### D1: GUI Framework → PySide6
 
-## Research Areas
+- Cross-platform (Windows, Linux, macOS)
+- Same language as AI pipeline (Python + PyTorch)
+- Direct GPU access, no web bridge needed
+- Native file dialogs, sliders, image display
 
-- Modern video matting models (RVM, MODNet, BackgroundMattingV2, ViTMatte)
-- VR-specific challenges (lens distortion, stereo consistency, 360° seam handling)
-- Performance requirements for VR resolution content (4K+ per eye)
-- Existing tools and their limitations
+### D2: Primary Matting Model → RVM (Robust Video Matting)
 
-## Decisions
+- Fully automatic — no first-frame mask needed
+- Recurrent architecture gives temporal consistency (no flicker)
+- Real-time capable (4K @ 76fps on GTX 1080 Ti)
+- Well-tested, simple API, small model size
+- MobileNetV3 variant for speed, ResNet50 for quality
 
-*(Decisions will be recorded here as planning progresses.)*
+### D3: Output Format → DeoVR Alpha Pack
 
-## Architecture
+- Fisheye projection with alpha channel packed vertically
+- Requires `_ALPHA` in filename for DeoVR recognition
+- Uses DeoVR's documented FFmpeg conversion pipeline
+- Red channel only for the alpha matte
 
-*(To be defined after initial planning discussion.)*
+## Future Enhancements
+
+- [ ] **MatAnyone 2** support — CVPR 2026 state-of-the-art, better edge quality
+      (requires SAM2 for first-frame mask auto-generation)
+- [ ] **VideoMaMa** support — Adobe's generative matting approach
+- [ ] **Batch processing** — queue multiple videos
+- [ ] **Auto-download DeoVR mask** — bundle or download mask8k.png
+- [ ] **SBS split mode** — process left/right eyes independently for better quality
+- [ ] **Audio preservation** — ensure audio track carries through all steps
+- [ ] **Preview scrubber** — seek to any frame for pre-processing preview
+- [ ] **Settings persistence** — remember last-used settings
+
+## Research Notes
+
+### Video Matting Models Compared
+
+| Model | Type | Input Required | Quality | Speed | Year |
+|-------|------|---------------|---------|-------|------|
+| **RVM** | Recurrent | None (auto) | Good | Very fast | 2021 |
+| **MatAnyone** | Memory-based | First-frame mask | Very good | Medium | 2025 |
+| **MatAnyone 2** | Memory-based + MQE | First-frame mask | Best | Medium | 2026 |
+| **VideoMaMa** | Diffusion-based | Coarse mask | Very good | Slow | 2026 |
+| **rembg** | Per-frame | None | Basic | Fast | 2022 |
+
+### DeoVR Alpha Format
+
+- Alpha passthrough only works with **fisheye projection**
+- Alpha channel packed **vertically** (video on top, matte on bottom)
+- Matte uses **red channel only**
+- Filename must contain `_ALPHA` for DeoVR to recognize it
+- Equirectangular → fisheye conversion via FFmpeg v360 filter
+- Requires mask8k.png from DeoVR for proper circle masking
