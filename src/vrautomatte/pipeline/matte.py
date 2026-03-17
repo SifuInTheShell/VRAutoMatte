@@ -49,38 +49,62 @@ class MatteProcessor(Protocol):
 
 
 class POVExclusionProcessor:
-    """Wrapper that subtracts a static POV body mask.
+    """Wrapper that subtracts a POV body mask from RVM output.
 
-    Used with RVM for fast-but-rough POV mode. SAM2 generates
-    a POV body mask from frame 1. Each frame's alpha output
-    is zeroed wherever the POV mask is active.
-
-    The mask is static (frame 1 only) so won't track large
-    POV body movements, but works well for typical POV
-    content where the camera holder stays relatively still.
+    SAM2 generates an initial POV body mask from frame 1.
+    A scene change detector monitors for drastic changes
+    (e.g. laying → standing) and regenerates the mask.
 
     Args:
         inner: The actual MatteProcessor (e.g. RVMProcessor).
         pov_body_mask: Binary mask (H, W), uint8 (0 or 255).
+        device: GPU device for SAM2 reloads on scene change.
     """
 
     def __init__(
         self,
         inner: MatteProcessor,
         pov_body_mask: np.ndarray,
+        device: torch.device | None = None,
     ):
-        self._inner = inner
-        # Normalize to float 0-1 for multiplication
-        self._exclusion = (
-            1.0 - pov_body_mask.astype(np.float32) / 255.0
-        )
-        logger.info(
-            "POV exclusion wrapper active — "
-            f"mask covers {(pov_body_mask > 0).sum()} px"
+        from vrautomatte.pipeline.scene_detect import (
+            SceneChangeDetector,
         )
 
+        self._inner = inner
+        self._device = device or get_device()
+        self._set_exclusion_mask(pov_body_mask)
+        self._scene_detector = SceneChangeDetector()
+
+    def _set_exclusion_mask(
+        self, mask: np.ndarray
+    ) -> None:
+        """Set or update the exclusion mask."""
+        self._exclusion = (
+            1.0 - mask.astype(np.float32) / 255.0
+        )
+        logger.info(
+            "POV exclusion mask set — "
+            f"covers {(mask > 0).sum()} px"
+        )
+
+    def _refresh_mask(self, frame: np.ndarray) -> None:
+        """Regenerate POV body mask from current frame."""
+        from vrautomatte.pipeline.sam2_masks import (
+            generate_pov_body_mask,
+        )
+        logger.info("Scene change — refreshing POV mask")
+        new_mask = generate_pov_body_mask(
+            frame, self._device
+        )
+        self._set_exclusion_mask(new_mask)
+        self._scene_detector.update_reference(frame)
+
     def process_frame(self, frame: np.ndarray) -> np.ndarray:
-        """Process frame then subtract POV body region."""
+        """Process frame, refresh mask on scene change."""
+        if self._scene_detector.check(frame):
+            self._refresh_mask(frame)
+
         matte = self._inner.process_frame(frame)
 
         # Resize exclusion mask if frame size differs
@@ -101,8 +125,9 @@ class POVExclusionProcessor:
         return result.clip(0, 255).astype(np.uint8)
 
     def reset(self) -> None:
-        """Reset inner processor state."""
+        """Reset inner processor and scene detector."""
         self._inner.reset()
+        self._scene_detector.reset()
 
     def cleanup(self) -> None:
         """Release inner processor resources."""
@@ -152,7 +177,7 @@ def create_processor(
                 first_frame, device
             )
             return POVExclusionProcessor(
-                processor, body_mask
+                processor, body_mask, device=device
             )
         elif pov_mode:
             logger.warning(
@@ -183,7 +208,9 @@ def create_processor(
             first_frame, device, pov_mode=pov_mode
         )
         return MatAnyone2Processor(
-            first_frame_mask=mask, device=device
+            first_frame_mask=mask,
+            device=device,
+            pov_mode=pov_mode,
         )
 
     raise ValueError(
