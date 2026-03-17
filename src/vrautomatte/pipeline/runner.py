@@ -8,6 +8,7 @@ Steps:
 5. (Optional) Pack alpha channel for DeoVR format
 """
 
+import os
 import shutil
 import subprocess
 import tempfile
@@ -84,6 +85,9 @@ class PipelineConfig:
     start_frame: int = 0
     end_frame: int = 0
 
+    # Custom temp directory (empty = system default).
+    temp_dir: str = ""
+
 
 @dataclass
 class PipelineProgress:
@@ -126,6 +130,71 @@ class Pipeline:
             progress.elapsed_sec = time.monotonic() - self._start_time
             self.on_progress(progress)
 
+    def _extract_frames_with_progress(
+        self,
+        cmd: list[str],
+        frames_dir: Path,
+        expected: int,
+        total_stages: int,
+    ) -> None:
+        """Run ffmpeg extraction while reporting frame progress.
+
+        Runs ffmpeg with no pipe redirection (avoiding Windows
+        pipe-buffer issues) and polls the output directory to
+        track progress.
+        """
+        process = subprocess.Popen(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        extract_start = time.monotonic()
+        last_count = 0
+
+        while process.poll() is None:
+            if self._cancelled:
+                process.terminate()
+                process.wait()
+                raise InterruptedError("Pipeline cancelled")
+
+            time.sleep(0.5)
+            try:
+                count = len(os.listdir(frames_dir))
+            except OSError:
+                continue
+            if count != last_count:
+                last_count = count
+                elapsed = time.monotonic() - extract_start
+                fps = count / elapsed if elapsed > 0 else 0
+                remaining = expected - count
+                eta = remaining / fps if fps > 0 else 0
+                self._emit(PipelineProgress(
+                    stage="Extracting frames",
+                    stage_num=1,
+                    total_stages=total_stages,
+                    frame_num=count,
+                    total_frames=expected,
+                    fps=fps,
+                    eta_sec=eta,
+                ))
+
+        if process.returncode != 0:
+            raise RuntimeError(
+                "ffmpeg frame extraction failed "
+                f"(exit code {process.returncode})"
+            )
+
+        # Emit final progress
+        count = len(os.listdir(frames_dir))
+        self._emit(PipelineProgress(
+            stage="Extracting frames",
+            stage_num=1,
+            total_stages=total_stages,
+            frame_num=count,
+            total_frames=expected,
+        ))
+
     def run(self) -> Path:
         """Execute the full pipeline.
 
@@ -156,7 +225,13 @@ class Pipeline:
             f"{info['num_frames']} frames"
         )
 
-        with tempfile.TemporaryDirectory(prefix="vrautomatte_") as tmpdir:
+        tmp_kwargs = {"prefix": "vrautomatte_"}
+        if config.temp_dir:
+            tmp_base = Path(config.temp_dir)
+            tmp_base.mkdir(parents=True, exist_ok=True)
+            tmp_kwargs["dir"] = str(tmp_base)
+
+        with tempfile.TemporaryDirectory(**tmp_kwargs) as tmpdir:
             tmp = Path(tmpdir)
             frames_dir = tmp / "frames"
             mattes_dir = tmp / "mattes"
@@ -186,9 +261,11 @@ class Pipeline:
             )
 
             # ── Stage 1: Extract frames ──
+            total_stages = self._total_stages()
             self._emit(PipelineProgress(
                 stage="Extracting frames", stage_num=1,
-                total_stages=self._total_stages(),
+                total_stages=total_stages,
+                total_frames=num_to_process,
             ))
             logger.info("Stage 1: Extracting frames...")
 
@@ -206,11 +283,15 @@ class Pipeline:
                 )
                 end = min(end, info["num_frames"])
                 count = end - start
-                # Select frame range via video filter
+                # Select frame range via video filter.
+                # -frames:v stops ffmpeg after outputting all
+                # selected frames instead of decoding the entire
+                # video (critical for large files).
                 extract_cmd += [
                     "-vf",
                     f"select='between(n\\,{start}\\,{end - 1})'",
                     "-vsync", "vfr",
+                    "-frames:v", str(count),
                 ]
                 logger.info(
                     f"Frame range: {start + 1}–{end} "
@@ -219,8 +300,11 @@ class Pipeline:
             extract_cmd.append(
                 str(frames_dir / "frame_%06d.png")
             )
-            subprocess.run(
-                extract_cmd, capture_output=True, check=True,
+
+            # Run ffmpeg and track extraction progress
+            self._extract_frames_with_progress(
+                extract_cmd, frames_dir, num_to_process,
+                total_stages,
             )
 
             frame_files = sorted(frames_dir.glob("*.png"))
