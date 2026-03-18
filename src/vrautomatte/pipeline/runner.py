@@ -197,6 +197,8 @@ class Pipeline:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+        extract_start = time.monotonic()
+        last_count = 0
 
         while process.poll() is None:
             if self._cancelled:
@@ -206,6 +208,31 @@ class Pipeline:
                     "Pipeline cancelled"
                 )
             time.sleep(0.5)
+            try:
+                count = len(os.listdir(frames_dir))
+            except OSError:
+                continue
+            if count != last_count:
+                last_count = count
+                elapsed = (
+                    time.monotonic() - extract_start
+                )
+                fps = (
+                    count / elapsed if elapsed > 0 else 0
+                )
+                remaining = num_frames - count
+                eta = (
+                    remaining / fps if fps > 0 else 0
+                )
+                self._emit(PipelineProgress(
+                    stage="Extracting frames",
+                    stage_num=1,
+                    total_stages=self._total_stages(),
+                    frame_num=count,
+                    total_frames=num_frames,
+                    fps=fps,
+                    eta_sec=eta,
+                ))
 
         if process.returncode != 0:
             raise RuntimeError(
