@@ -186,20 +186,23 @@ class MainWindow(QMainWindow):
         model_label.setToolTip(
             "AI model used for person segmentation.\n\n"
             "• mobilenetv3 — Fastest, good for previewing "
-            "and lower-end GPUs (~50 fps at 1080p)\n"
+            "and lower-end GPUs (~50 fps at 1080p). "
+            "Detects ALL people in the frame.\n"
             "• resnet50 — Better edge quality, slightly "
-            "slower (~30 fps at 1080p)\n"
-            "• MatAnyone 2 — Best quality, CVPR 2026 SOTA. "
-            "Sharpest edges, best hair/transparency "
-            "(~8 fps at 1080p, needs ~6 GB VRAM)"
+            "slower (~30 fps at 1080p). "
+            "Detects ALL people. Best for crowds.\n"
+            "• MatAnyone 2 — Sharpest edges, best "
+            "hair/transparency (~8 fps, ~6 GB VRAM). "
+            "Tracks ONE person from the first frame. "
+            "Use for single-subject close-ups only."
         )
         row1.addWidget(model_label)
         self.model_combo = QComboBox()
         self._ma2_available = _check_matanyone2()
         self.model_combo.addItems([
-            "mobilenetv3 (fast)",
-            "resnet50 (quality)",
-            "MatAnyone 2 (quality+)"
+            "mobilenetv3 — all people, fast",
+            "resnet50 — all people, quality",
+            "MatAnyone 2 — single subject"
             if self._ma2_available
             else "MatAnyone 2 — click to install",
         ])
@@ -1261,7 +1264,7 @@ class MainWindow(QMainWindow):
                 status.setText("✅ Installation complete!")
                 self._ma2_available = True
                 self.model_combo.setItemText(
-                    2, "MatAnyone 2 (quality+)"
+                    2, "MatAnyone 2 — single subject"
                 )
                 self.model_combo.setCurrentIndex(2)
             else:
