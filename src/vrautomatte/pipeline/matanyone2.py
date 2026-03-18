@@ -161,11 +161,14 @@ class MatAnyone2Processor:
 
         # Apply memory tuning to the model's config before
         # passing it to InferenceCore (which reads from cfg).
+        # Note: max_internal_size is NOT set here because
+        # InferenceCore's internal resize is incompatible with
+        # the matting path (resize expects multi-channel masks
+        # but matting expects single-channel H*W). Frame
+        # resolution is controlled by FrameScaler instead.
         cfg = model.cfg
         cfg.max_mem_frames = max_mem_frames
         cfg.use_long_term = use_long_term
-        if max_internal_size > 0:
-            cfg.max_internal_size = max_internal_size
 
         self._processor = InferenceCore(
             model, cfg=cfg, device=str(device)
@@ -236,13 +239,9 @@ class MatAnyone2Processor:
         img_tensor = self._to_tensor(frame)
 
         with torch.no_grad(), self._autocast():
-            # InferenceCore.step expects mask as (num_objects, H, W)
-            # for non-idx_mask mode. unsqueeze(0) adds the object
-            # channel so F.interpolate gets 4D after its unsqueeze.
             mask_tensor = (
                 torch.from_numpy(self._mask)
                 .float()
-                .unsqueeze(0)
                 .to(self.device)
             )
             self._processor.step(
