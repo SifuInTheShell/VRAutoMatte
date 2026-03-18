@@ -219,27 +219,19 @@ def _run_sam2_masks(
     return masks
 
 
-def _select_person_mask(
-    masks: list, frame_shape: tuple
-) -> np.ndarray:
-    """Select the most likely person mask from SAM2 output.
-
-    Uses centering, size, and shape heuristics instead of
-    blindly picking the largest mask (which is often the
-    background wall/floor).
-
-    Args:
-        masks: SAM2 mask list with 'segmentation'/'area'.
-        frame_shape: (H, W, C).
+def _score_person_masks(
+    masks: list, frame_shape: tuple,
+) -> list[tuple[float, dict]]:
+    """Score masks by person-likeness.
 
     Returns:
-        Binary mask (H, W), uint8 (0 or 255).
+        List of (score, mask_dict) sorted highest-first.
     """
     h, w = frame_shape[:2]
     total_px = h * w
     center_y, center_x = h / 2, w / 2
 
-    # Filter to reasonable person-sized masks (1%-60% of frame)
+    # Filter to reasonable person-sized masks (1%-60%)
     candidates = [
         m for m in masks
         if 0.01 * total_px < m["area"] < 0.60 * total_px
@@ -253,11 +245,9 @@ def _select_person_mask(
         area_frac = m["area"] / total_px
         cy, cx = _mask_center_of_mass(seg)
 
-        # Distance from center (normalized 0-1)
         dist_y = abs(cy - center_y) / center_y
         dist_x = abs(cx - center_x) / center_x
 
-        # Aspect ratio — persons are taller than wide
         ys, xs = np.where(seg)
         if len(ys) > 0:
             bbox_h = ys.max() - ys.min() + 1
@@ -267,18 +257,14 @@ def _select_person_mask(
             aspect = 1.0
 
         score = 1.0
-        # Prefer centered masks
         score -= dist_y * 0.25
         score -= dist_x * 0.2
-        # Prefer person-sized (5-40% of frame)
         if 0.03 < area_frac < 0.40:
             score += 0.2
         elif area_frac >= 0.60:
-            score -= 0.4  # Probably background
-        # Prefer tall aspect ratio (person-shaped)
+            score -= 0.4
         if aspect > 1.5:
             score += 0.15
-        # Reasonable size bonus
         score += min(area_frac, 0.3) * 0.15
 
         scored.append((score, m))
@@ -290,13 +276,73 @@ def _select_person_mask(
         )
 
     scored.sort(key=lambda x: x[0], reverse=True)
+    return scored
+
+
+def _select_person_mask(
+    masks: list, frame_shape: tuple
+) -> np.ndarray:
+    """Select the most likely person mask from SAM2 output.
+
+    Returns the single highest-scoring person-shaped mask.
+
+    Args:
+        masks: SAM2 mask list with 'segmentation'/'area'.
+        frame_shape: (H, W, C).
+
+    Returns:
+        Binary mask (H, W), uint8 (0 or 255).
+    """
+    scored = _score_person_masks(masks, frame_shape)
     best = scored[0]
+    total_px = frame_shape[0] * frame_shape[1]
     mask = best[1]["segmentation"].astype(np.uint8) * 255
     logger.info(
         f"Selected person mask: score={best[0]:.2f}, "
         f"coverage={best[1]['area']}/{total_px}"
     )
     return mask
+
+
+def _select_all_person_masks(
+    masks: list, frame_shape: tuple,
+    min_score: float = 0.4,
+) -> np.ndarray:
+    """Select all person-like masks and combine into one.
+
+    Union of all masks scoring above ``min_score``. Falls back
+    to the single best mask if none meet the threshold.
+
+    Args:
+        masks: SAM2 mask list with 'segmentation'/'area'.
+        frame_shape: (H, W, C).
+        min_score: Minimum person-likeness score to include.
+
+    Returns:
+        Combined binary mask (H, W), uint8 (0 or 255).
+    """
+    scored = _score_person_masks(masks, frame_shape)
+    total_px = frame_shape[0] * frame_shape[1]
+
+    selected = [
+        m for score, m in scored if score >= min_score
+    ]
+    if not selected:
+        selected = [scored[0][1]]
+
+    combined = np.zeros(
+        frame_shape[:2], dtype=np.uint8
+    )
+    for m in selected:
+        combined[m["segmentation"]] = 255
+
+    coverage = int(combined.sum() / 255)
+    logger.info(
+        f"Combined {len(selected)} person masks "
+        f"(min_score={min_score}): "
+        f"coverage={coverage}/{total_px}"
+    )
+    return combined
 
 
 def generate_first_frame_mask(
@@ -306,8 +352,8 @@ def generate_first_frame_mask(
 ) -> np.ndarray:
     """Auto-generate a segmentation mask from frame 1.
 
-    Default: best person-shaped mask (centered, tall aspect,
-    reasonable size). POV mode: non-POV person.
+    Default: union of all person-shaped masks (handles
+    multiple close-up subjects). POV mode: non-POV person.
 
     Args:
         frame: RGB array (H, W, 3), uint8.
@@ -322,7 +368,7 @@ def generate_first_frame_mask(
     if pov_mode:
         return _select_non_pov_mask(masks, frame.shape)
 
-    return _select_person_mask(masks, frame.shape)
+    return _select_all_person_masks(masks, frame.shape)
 
 
 def generate_pov_body_mask(
