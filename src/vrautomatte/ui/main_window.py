@@ -539,6 +539,13 @@ class MainWindow(QMainWindow):
         status_row.addWidget(self.theme_btn)
         root.addLayout(status_row)
 
+        # Convert all plain-text tooltips to rich text so Qt
+        # enables automatic word-wrapping instead of clipping.
+        for w in self.findChildren(QWidget):
+            tip = w.toolTip()
+            if tip and "<" not in tip:
+                w.setToolTip(tip.replace("\n", "<br>"))
+
     # ── Settings Persistence ──
 
     def _restore_settings(self):
