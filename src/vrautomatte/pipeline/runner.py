@@ -174,7 +174,8 @@ class Pipeline:
 
         Uses ``-ss`` before ``-i`` for keyframe-based seeking.
         ~1-2 frame imprecision at chunk boundaries is acceptable
-        for VR content.
+        for VR content.  Polls the output directory so the UI
+        stays responsive and shows extraction progress.
         """
         for f in frames_dir.glob("frame_*.png"):
             try:
@@ -189,12 +190,29 @@ class Pipeline:
             "-frames:v", str(num_frames),
             str(frames_dir / "frame_%06d.png"),
         ]
-        subprocess.run(
-            cmd, check=True,
+
+        process = subprocess.Popen(
+            cmd,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+
+        while process.poll() is None:
+            if self._cancelled:
+                process.terminate()
+                process.wait()
+                raise InterruptedError(
+                    "Pipeline cancelled"
+                )
+            time.sleep(0.5)
+
+        if process.returncode != 0:
+            raise RuntimeError(
+                "ffmpeg chunk extraction failed "
+                f"(exit code {process.returncode})"
+            )
+
         return sorted(frames_dir.glob("frame_*.png"))
 
     def _extract_frames_with_progress(
