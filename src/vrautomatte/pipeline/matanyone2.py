@@ -159,16 +159,16 @@ class MatAnyone2Processor:
                     "continuing without compilation"
                 )
 
-        # InferenceCore with memory tuning params
-        ic_kwargs = {
-            "max_mem_frames": max_mem_frames,
-            "use_long_term": use_long_term,
-        }
+        # Apply memory tuning to the model's config before
+        # passing it to InferenceCore (which reads from cfg).
+        cfg = model.cfg
+        cfg.max_mem_frames = max_mem_frames
+        cfg.use_long_term = use_long_term
         if max_internal_size > 0:
-            ic_kwargs["max_internal_size"] = max_internal_size
+            cfg.max_internal_size = max_internal_size
 
         self._processor = InferenceCore(
-            model, device=str(device), **ic_kwargs
+            model, cfg=cfg, device=str(device)
         )
         logger.info("MatAnyone 2 loaded")
 
