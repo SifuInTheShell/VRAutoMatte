@@ -3,7 +3,7 @@
 ## Development Setup
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/VRAutoMatte.git
+git clone https://github.com/SifuInTheShell/VRAutoMatte.git
 cd VRAutoMatte
 uv sync --extra matanyone2   # or just `uv sync` for RVM-only
 ```

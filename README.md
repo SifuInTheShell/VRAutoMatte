@@ -4,8 +4,13 @@ Automated AI video matting for VR passthrough content. Separate people from back
 
 ## Features
 
-- **Three AI matting models** — RVM MobileNetV3 (fast), RVM ResNet50 (balanced), MatAnyone 2 (best quality, CVPR 2026)
-- **Zero manual input** — SAM2 auto-generates the first-frame mask for MatAnyone 2; RVM needs no mask at all
+- **Three AI matting models** — RVM MobileNetV3 (fast), RVM ResNet50 (balanced), MatAnyone 2 (best edges, CVPR 2026)
+- **All-people detection** — RVM models detect every person in the frame (crowds, groups, any count). MatAnyone 2 tracks close-up subjects with superior edge quality.
+- **Zero manual input** — SAM2 auto-generates first-frame masks for MatAnyone 2; RVM needs no mask at all
+- **Chunked extraction** — processes video in chunks instead of extracting all frames upfront, reducing peak disk usage from full-video to chunk-size
+- **Resumable pipeline** — checkpoint after each chunk; interrupted jobs resume from the last completed segment
+- **GPU auto-config** — automatically adapts matting resolution and memory settings to your GPU's VRAM (24 GB → full res, 16 GB → 1080p, 12 GB → 810p, etc.)
+- **Frame downscaling** — LANCZOS downscale before matting, upscale matte after; prevents OOM on 8K content with consumer GPUs
 - **POV body removal** — automatically detect and exclude the camera operator's body from the matte
 - **Scene change detection** — refreshes masks automatically when cuts or position changes occur
 - **SBS stereo support** — auto-detects side-by-side VR videos and processes each eye independently
@@ -14,9 +19,9 @@ Automated AI video matting for VR passthrough content. Separate people from back
 - **Batch processing** — queue multiple files, process sequentially
 - **Drag & drop** — drop one video to set input, drop multiple to batch queue
 - **Light / dark theme** — toggle with the 🌙/☀️ button; preference is saved
-- **Settings persistence** — remembers model, quality, format, window size, and theme
+- **Settings persistence** — remembers model, quality, format, chunk size, and theme
 - **Cross-platform** — Windows, macOS, Linux (PySide6 GUI)
-- **GPU accelerated** — NVIDIA CUDA, AMD ROCm, Apple MPS, Intel XPU, or CPU fallback
+- **GPU accelerated** — NVIDIA CUDA (FP16), AMD ROCm, Apple MPS (FP16), Intel XPU, or CPU fallback
 
 ## Quick Start
 
@@ -40,7 +45,7 @@ sudo apt install ffmpeg
 ### Install & Run
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/VRAutoMatte.git
+git clone https://github.com/SifuInTheShell/VRAutoMatte.git
 cd VRAutoMatte
 
 # Install with uv (recommended)
@@ -69,9 +74,9 @@ This pulls in [MatAnyone 2](https://github.com/pq-yang/MatAnyone2) and [SAM2](ht
 1. **Launch** the app: `uv run vrautomatte`
 2. **Load a video** — click Browse or drag a file onto the window
 3. **Choose a model**:
-   - `RVM — mobilenetv3` — fastest, good for previewing
-   - `RVM — resnet50` — better quality, still fast
-   - `MatAnyone 2` — best edge quality (requires `--extra matanyone2`)
+   - `mobilenetv3` — fastest, detects all people (crowds, groups)
+   - `resnet50` — better quality, detects all people
+   - `MatAnyone 2` — sharpest edges, tracks close-up subjects (requires `--extra matanyone2`)
 4. **Choose output format**:
    - `Matte Only` — just the alpha matte video
    - `DeoVR Alpha Pack` — full passthrough pipeline for Quest headsets
@@ -86,13 +91,18 @@ This pulls in [MatAnyone 2](https://github.com/pq-yang/MatAnyone2) and [SAM2](ht
 
 ### Model Comparison
 
-| Model | Quality | Speed | GPU Memory | Input Required |
-|-------|---------|-------|------------|----------------|
-| RVM MobileNetV3 | Good | ~50 fps | ~1 GB | None |
-| RVM ResNet50 | Better | ~30 fps | ~2 GB | None |
-| MatAnyone 2 | Best | ~8 fps | ~6 GB | None (auto SAM2) |
+| Model | People | Edges | Speed | GPU Memory | Best For |
+|-------|--------|-------|-------|------------|----------|
+| RVM MobileNetV3 | All | Good | ~50 fps | ~1 GB | Previewing, crowds, lower-end GPUs |
+| RVM ResNet50 | All | Better | ~30 fps | ~2 GB | Crowds, groups, general use |
+| MatAnyone 2 | Close-up | Best | ~8 fps | ~6 GB | 1-3 subjects, hair/transparency |
 
 *FPS measured at 1080p on RTX 4070. Actual performance varies by resolution and hardware.*
+
+**Which model should I use?**
+- Scenes with many people (street, event, crowd) → **resnet50** (detects every person automatically)
+- Close-up with 1-3 subjects where edge quality matters → **MatAnyone 2** (SAM2 auto-selects all visible people)
+- Quick preview or limited GPU → **mobilenetv3**
 
 ### POV Mode
 
@@ -174,7 +184,9 @@ src/vrautomatte/
 │   ├── matanyone2.py          # MatAnyone 2 processor
 │   ├── sam2_masks.py          # SAM2 mask generation + POV heuristics
 │   ├── scene_detect.py        # Scene change detector (histogram correlation)
-│   └── runner.py              # Pipeline orchestrator (extract → matte → pack)
+│   ├── scaler.py              # Frame downscaler for VRAM-constrained GPUs
+│   ├── checkpoint.py          # Resumable pipeline checkpoints
+│   └── runner.py              # Pipeline orchestrator (chunked extract → matte → pack)
 ├── ui/
 │   ├── main_window.py         # Main GUI window
 │   ├── preview.py             # Dual-pane preview + scrubber
@@ -182,7 +194,7 @@ src/vrautomatte/
 │   └── worker.py              # Background processing thread
 └── utils/
     ├── ffmpeg.py              # FFmpeg wrappers (extract, fisheye, pack)
-    ├── gpu.py                 # Device detection (CUDA/ROCm/MPS/XPU/CPU)
+    ├── gpu.py                 # Device detection + GPU auto-configuration
     ├── masks.py               # DeoVR mask auto-download
     ├── sbs.py                 # SBS stereo split/merge/detection
     └── settings.py            # Settings persistence
@@ -191,13 +203,22 @@ src/vrautomatte/
 ### Processing Pipeline
 
 ```
+Chunked Pipeline (runner.py)
+  for each chunk of N frames:
+    1. ffmpeg -ss <timestamp> → extract chunk (keyframe seek)
+    2. FrameScaler.downscale() if frame exceeds GPU budget
+    3. MatteProcessor.process_frame() per frame
+    4. FrameScaler.upscale_matte() back to original resolution
+    5. Flush segment video, save checkpoint
+  concat all segments → final matte
+
 MatteProcessor Protocol
-├── RVMProcessor          — torch.jit.load() → recurrent forward pass
-├── MatAnyone2Processor   — SAM2 mask → InferenceCore → per-frame matting
+├── RVMProcessor          — recurrent forward pass, detects ALL people
+├── MatAnyone2Processor   — SAM2 masks → InferenceCore, tracks close-up subjects
 └── POVExclusionProcessor — wraps any processor, subtracts POV body mask
 
-SceneChangeDetector
-└── histogram correlation per frame → triggers mask refresh on cuts
+GPU Auto-Config (gpu.py)
+└── VRAM tier → max_matting_pixels, mem_frames, downsample_ratio
 ```
 
 ## Development
