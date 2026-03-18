@@ -71,3 +71,73 @@ def get_device_info() -> dict:
     elif device.type == "mps":
         info["name"] = "Apple Silicon (MPS)"
     return info
+
+
+def auto_configure_gpu() -> dict:
+    """Auto-configure matting parameters based on GPU VRAM.
+
+    Returns:
+        Dict with recommended settings:
+        - max_matting_pixels: Max frame pixels (0 = no limit).
+        - ma2_internal_size: Memory bank resolution (px).
+        - ma2_mem_frames: Working-memory slots.
+        - downsample_ratio: RVM processing scale.
+    """
+    vram_gb = 0.0
+    device_type = "cpu"
+
+    if torch.cuda.is_available():
+        device_type = "cuda"
+        mem = torch.cuda.get_device_properties(0).total_memory
+        vram_gb = mem / (1024 ** 3)
+    elif (
+        hasattr(torch.backends, "mps")
+        and torch.backends.mps.is_available()
+    ):
+        device_type = "mps"
+        vram_gb = 16.0  # Assume 16 GB shared memory
+
+    if vram_gb >= 24:
+        cfg = {
+            "max_matting_pixels": 0,
+            "ma2_internal_size": 480,
+            "ma2_mem_frames": 5,
+            "downsample_ratio": 0.25,
+        }
+    elif vram_gb >= 16:
+        cfg = {
+            "max_matting_pixels": 1920 * 1080,
+            "ma2_internal_size": 480,
+            "ma2_mem_frames": 3,
+            "downsample_ratio": 0.125,
+        }
+    elif vram_gb >= 12:
+        cfg = {
+            "max_matting_pixels": 1440 * 810,
+            "ma2_internal_size": 360,
+            "ma2_mem_frames": 2,
+            "downsample_ratio": 0.125,
+        }
+    elif vram_gb >= 8:
+        cfg = {
+            "max_matting_pixels": 1280 * 720,
+            "ma2_internal_size": 320,
+            "ma2_mem_frames": 2,
+            "downsample_ratio": 0.1,
+        }
+    else:
+        cfg = {
+            "max_matting_pixels": 960 * 540,
+            "ma2_internal_size": 240,
+            "ma2_mem_frames": 1,
+            "downsample_ratio": 0.1,
+        }
+
+    logger.info(
+        f"GPU auto-config: {device_type} {vram_gb:.1f} GB -> "
+        f"max_px={cfg['max_matting_pixels']}, "
+        f"internal={cfg['ma2_internal_size']}, "
+        f"mem_frames={cfg['ma2_mem_frames']}, "
+        f"ds_ratio={cfg['downsample_ratio']}"
+    )
+    return cfg
