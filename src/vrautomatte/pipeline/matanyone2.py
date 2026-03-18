@@ -107,7 +107,7 @@ class MatAnyone2Processor:
         self._is_first_frame = True
         self._pov_mode = pov_mode
         self._scene_detector = None
-        self._use_fp16 = use_fp16 and device.type == "cuda"
+        self._use_fp16 = use_fp16 and device.type in ("cuda", "mps")
 
         if pov_mode:
             from vrautomatte.pipeline.scene_detect import (
@@ -202,6 +202,10 @@ class MatAnyone2Processor:
         if self._use_fp16 and self.device.type == "cuda":
             return torch.autocast(
                 device_type="cuda", dtype=torch.float16
+            )
+        if self._use_fp16 and self.device.type == "mps":
+            return torch.autocast(
+                device_type="mps", dtype=torch.float16
             )
         # No-op context manager on CPU / non-FP16 paths
         return torch.autocast(device_type="cpu", enabled=False)

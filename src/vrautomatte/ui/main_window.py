@@ -422,6 +422,41 @@ class MainWindow(QMainWindow):
         temp_row.addWidget(self.temp_clear_btn)
         settings_layout.addLayout(temp_row)
 
+        # Row 6: Chunk size + Auto-resume
+        chunk_row = QHBoxLayout()
+        chunk_label = QLabel("Chunk size:")
+        chunk_label.setToolTip(
+            "Frames to extract per chunk.\n\n"
+            "• 100 — Minimal disk usage, more overhead\n"
+            "• 250 — Low disk, balanced\n"
+            "• 500 — Default. Good balance\n"
+            "• 1000 — Less overhead, more disk\n\n"
+            "Smaller = less peak disk usage."
+        )
+        chunk_row.addWidget(chunk_label)
+        self.chunk_size_combo = QComboBox()
+        self.chunk_size_combo.addItems([
+            "100", "250", "500 (default)", "1000"
+        ])
+        self.chunk_size_combo.setCurrentIndex(2)
+        self.chunk_size_combo.setToolTip(
+            chunk_label.toolTip()
+        )
+        chunk_row.addWidget(self.chunk_size_combo)
+        chunk_row.addSpacing(20)
+        self.resume_check = QCheckBox(
+            "Auto-resume on restart"
+        )
+        self.resume_check.setChecked(True)
+        self.resume_check.setToolTip(
+            "Save progress after each chunk.\n"
+            "If interrupted, resume from the last\n"
+            "completed chunk on restart."
+        )
+        chunk_row.addWidget(self.resume_check)
+        chunk_row.addStretch()
+        settings_layout.addLayout(chunk_row)
+
         root.addWidget(settings_group)
 
         # ── Preview ──
@@ -479,6 +514,14 @@ class MainWindow(QMainWindow):
 
         root.addLayout(action_layout)
 
+        # Disk usage estimate
+        self.disk_label = QLabel("")
+        self.disk_label.setObjectName("diskLabel")
+        self.disk_label.setStyleSheet(
+            "font-size: 10px; font-style: italic;"
+        )
+        root.addWidget(self.disk_label)
+
         # Status bar
         status_row = QHBoxLayout()
         self.status_label = QLabel("Ready")
@@ -519,6 +562,12 @@ class MainWindow(QMainWindow):
         self.sbs_check.setChecked(s.get("is_sbs", False))
         self.pov_check.setChecked(s.get("pov_mode", False))
         self.temp_dir_edit.setText(s.get("temp_dir", ""))
+        self.chunk_size_combo.setCurrentIndex(
+            s.get("chunk_size", 2)
+        )
+        self.resume_check.setChecked(
+            s.get("auto_resume", True)
+        )
         self.resize(
             s.get("window_width", 900),
             s.get("window_height", 780),
@@ -538,6 +587,8 @@ class MainWindow(QMainWindow):
             "pov_mode": self.pov_check.isChecked(),
             "dark_theme": self._is_dark,
             "temp_dir": self.temp_dir_edit.text(),
+            "chunk_size": self.chunk_size_combo.currentIndex(),
+            "auto_resume": self.resume_check.isChecked(),
             "window_width": self.width(),
             "window_height": self.height(),
         })
@@ -945,6 +996,8 @@ class MainWindow(QMainWindow):
             2: "matanyone2",
         }
 
+        chunk_map = {0: 100, 1: 250, 2: 500, 3: 1000}
+
         config = PipelineConfig(
             input_path=input_path or self.input_edit.text(),
             output_path=output_path or self.output_edit.text(),
@@ -958,6 +1011,10 @@ class MainWindow(QMainWindow):
             is_sbs=self.sbs_check.isChecked(),
             pov_mode=self.pov_check.isChecked(),
             temp_dir=self.temp_dir_edit.text(),
+            chunk_size=chunk_map.get(
+                self.chunk_size_combo.currentIndex(), 500
+            ),
+            auto_resume=self.resume_check.isChecked(),
         )
 
         # Frame range
@@ -1084,6 +1141,7 @@ class MainWindow(QMainWindow):
         self._lock_ui()
         self.preview.clear()
         self.progress_bar.setValue(0)
+        self.disk_label.setText("")
 
         self.worker = PipelineWorker(config)
         self.worker.progress.connect(self._on_progress)
@@ -1229,8 +1287,18 @@ class MainWindow(QMainWindow):
 
         status = p.stage
         if p.total_frames > 0:
-            status += f" — frame {p.frame_num}/{p.total_frames}"
+            status += (
+                f" — frame {p.frame_num}/{p.total_frames}"
+            )
         self.status_label.setText(status)
+
+        if p.estimated_disk_gb > 0 and p.total_frames > 0:
+            frac = p.frame_num / p.total_frames
+            current = p.estimated_disk_gb * frac
+            self.disk_label.setText(
+                f"Disk: ~{current:.1f} / "
+                f"~{p.estimated_disk_gb:.1f} GB estimated"
+            )
 
         self.preview.update_preview(
             source_frame=p.source_frame,
@@ -1246,6 +1314,7 @@ class MainWindow(QMainWindow):
         """Handle single-file completion."""
         self._unlock_ui()
         self.progress_bar.setValue(100)
+        self.disk_label.setText("")
         self.status_label.setText(f"Complete: {output_path}")
         QMessageBox.information(
             self, "Processing Complete",
@@ -1263,6 +1332,7 @@ class MainWindow(QMainWindow):
     def _on_error(self, message: str):
         """Handle pipeline error."""
         self._unlock_ui()
+        self.disk_label.setText("")
         self.status_label.setText(f"Error: {message}")
         if message != "Pipeline cancelled.":
             QMessageBox.critical(self, "Error", message)
@@ -1278,6 +1348,8 @@ class MainWindow(QMainWindow):
         self.format_combo.setEnabled(False)
         self.crf_slider.setEnabled(False)
         self.downsample_combo.setEnabled(False)
+        self.chunk_size_combo.setEnabled(False)
+        self.resume_check.setEnabled(False)
 
     def _unlock_ui(self):
         """Re-enable UI after processing ends."""
@@ -1290,3 +1362,5 @@ class MainWindow(QMainWindow):
         self.format_combo.setEnabled(True)
         self.crf_slider.setEnabled(True)
         self.downsample_combo.setEnabled(True)
+        self.chunk_size_combo.setEnabled(True)
+        self.resume_check.setEnabled(True)

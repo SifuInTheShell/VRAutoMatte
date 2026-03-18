@@ -129,8 +129,8 @@ class RVMProcessor:
         if device is None:
             device = get_device()
 
-        # Only use FP16 on CUDA — CPU and MPS require FP32.
-        self._use_fp16 = use_fp16 and device.type == "cuda"
+        # FP16 on CUDA and MPS. CPU requires FP32.
+        self._use_fp16 = use_fp16 and device.type in ("cuda", "mps")
 
         # Apply TF32 + cuDNN benchmark flags before model load.
         configure_cuda_performance()

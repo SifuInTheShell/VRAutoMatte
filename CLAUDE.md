@@ -66,21 +66,48 @@ VRAutoMatte — Qt-based desktop app for automated video matting and alpha chann
 
 ## Open Issues
 
-### CUDA OOM on 5800x2900 video (RTX 5080 16GB)
-```
-CUDA out of memory. Tried to allocate 4.09 GiB. GPU 0 has a total capacity of 15.92 GiB
-of which 0 bytes is free. Of the allocated memory 18.48 GiB is allocated by PyTorch, and
-4.62 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is
-large try setting PYTORCH_ALLOC_CONF=expandable_segments:True to avoid fragmentation.
-See documentation for Memory Management
-(https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
-```
-- Occurs during matting of 5800x2900 content on RTX 5080 (16GB VRAM)
-- PyTorch allocated 18.48 GiB (exceeds 15.92 GiB capacity) + 4.62 GiB reserved but unused
-- TODO: investigate — likely need to lower downsample_ratio, process in tiles, or free SAM2 before matting
-- Try `PYTORCH_ALLOC_CONF=expandable_segments:True` as suggested by PyTorch
-- May need to reduce batch size or frame resolution before feeding to the model
+(None — CUDA OOM resolved by GPU auto-config + frame downscaling in 2026-03-18 changes)
 
 ## Features Added (2026-03-17)
 - **Custom temp directory:** UI setting with browse/reset buttons, persisted in settings.json, passed to `tempfile.TemporaryDirectory(dir=...)`
 - **Frame extraction progress:** Polls output directory every 0.5s, shows frame count, fps, and ETA in progress bar
+
+## Features Added (2026-03-18)
+
+### Chunked Extraction Pipeline
+- Replaced extract-all-then-matte with chunked loop: extract N frames -> matte -> flush segment -> repeat
+- Uses ffmpeg `-ss` keyframe seek (fast, ~1-2 frame imprecision at boundaries)
+- Peak source PNG disk drops from `num_frames * PNG_size` to `chunk_size * PNG_size`
+- New files: `pipeline/scaler.py`, `pipeline/checkpoint.py`
+
+### Resumable Pipeline (Checkpoint)
+- JSON checkpoint saved after each segment flush
+- Deterministic temp dir: `vrautomatte_{stem}_{config_hash[:8]}/`
+- Validates input_hash (first 64KB) + config_hash — stale checkpoint = fresh start
+- Stale temp dirs (>7 days) cleaned on pipeline start
+- UI checkbox "Auto-resume on restart"
+
+### GPU OOM Fix — Frame Downscaling
+- `pipeline/scaler.py`: FrameScaler pre-matte downscale + post-matte LANCZOS upscale
+- No-op if frame fits within max_pixels budget
+- For VR passthrough at 90+ FOV, quality impact is imperceptible
+
+### Adaptive GPU Configuration
+- `utils/gpu.py`: `auto_configure_gpu()` returns VRAM-tier recommendations
+- Tiers: >=24GB (no limit), 16GB (1080p), 12GB (810p), 8GB (720p), <=6GB (540p)
+- Auto-applied at pipeline start, only overrides defaults
+- For SBS: thresholds apply per-eye (already halved)
+
+### MPS FP16 Support
+- MatAnyone2 + RVM FP16 now enabled on Apple MPS (was CUDA-only)
+- Added MPS autocast path in matanyone2.py
+
+### Memory Cleanup
+- `gc.collect()` after SAM2 unload in sam2_masks.py
+- `torch.cuda.empty_cache()` between chunks in chunked pipeline
+
+### UI Additions
+- Chunk size combo (100/250/500/1000) with tooltip
+- Auto-resume checkbox
+- Disk usage estimate label below progress bar
+- GPU auto-config feedback in status bar

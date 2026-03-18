@@ -1,19 +1,20 @@
 """Pipeline orchestrator — chains all steps from input to output.
 
 Steps:
-1. Extract frames from input video
-2. Generate AI alpha matte for each frame (via RVM)
+1-2. Extract frames and generate mattes (chunked)
 3. Reassemble matte frames into a video
-4. (Optional) Convert equirectangular → fisheye
+4. (Optional) Convert equirectangular -> fisheye
 5. (Optional) Pack alpha channel for DeoVR format
 """
 
+import gc
+import math
 import os
 import shutil
 import subprocess
 import tempfile
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Callable
@@ -22,7 +23,15 @@ import numpy as np
 from loguru import logger
 from PIL import Image
 
+from vrautomatte.pipeline.checkpoint import (
+    PipelineCheckpoint,
+    cleanup_stale_dirs,
+    deterministic_temp_name,
+    hash_config,
+    hash_file_head,
+)
 from vrautomatte.pipeline.matte import create_processor
+from vrautomatte.pipeline.scaler import FrameScaler
 from vrautomatte.utils.ffmpeg import (
     check_ffmpeg,
     convert_to_fisheye,
@@ -30,6 +39,7 @@ from vrautomatte.utils.ffmpeg import (
     matte_to_red_channel,
     pack_alpha,
 )
+from vrautomatte.utils.gpu import auto_configure_gpu
 from vrautomatte.utils.sbs import (
     detect_sbs,
     merge_frames,
@@ -62,24 +72,24 @@ class PipelineConfig:
     output_path: str = ""
 
     # Matting settings
-    model_variant: str = "mobilenetv3"   # mobilenetv3/resnet50/matanyone2
-    downsample_ratio: float = 0.125      # RVM processing scale — 0.25 for HD, 0.125 for 4K/8K SBS
+    model_variant: str = "mobilenetv3"
+    downsample_ratio: float = 0.125
 
     # Output settings
     output_format: OutputFormat = OutputFormat.MATTE_ONLY
-    codec: str = "libx265"               # 'libx265' or 'libx264'
-    crf: int = 18                        # Quality (lower = better)
+    codec: str = "libx265"
+    crf: int = 18
 
     # VR-specific
     projection: ProjectionType = ProjectionType.EQUIRECTANGULAR
     fisheye_fov: int = 180
-    fisheye_mask_path: str = ""          # Path to DeoVR mask8k.png
+    fisheye_mask_path: str = ""
 
     # SBS processing
-    is_sbs: bool = False                 # Side-by-side stereo (per-eye)
+    is_sbs: bool = False
 
     # POV mode
-    pov_mode: bool = False               # Remove POV body + background
+    pov_mode: bool = False
 
     # Frame range (1-based, inclusive). 0 = unset (use all).
     start_frame: int = 0
@@ -88,35 +98,24 @@ class PipelineConfig:
     # Custom temp directory (empty = system default).
     temp_dir: str = ""
 
-    # ── MatAnyone 2 performance settings ──────────────────────────
-    # These only apply when model_variant == "matanyone2".
-
-    # Run model in FP16. Halves VRAM usage on CUDA. Default True.
+    # ── MatAnyone 2 performance settings ──────────────────────
     use_fp16: bool = True
-
-    # Memory-bank encoding resolution (px, short side).
-    # Reduces working-memory VRAM by ~95% at 480 vs full 4K.
-    # -1 = full resolution. Default 480.
     ma2_internal_size: int = 480
-
-    # Working-memory frame slots before long-term consolidation.
-    # Lower = less VRAM, marginally less temporal smoothing.
     ma2_mem_frames: int = 3
-
-    # XMem long-term memory potentiation. Required for videos
-    # longer than a few minutes — prevents unbounded VRAM growth.
     ma2_use_long_term: bool = True
-
-    # torch.compile with CUDA-graph-replay. Opt-in: adds ~30 s
-    # first-frame compilation cost, saves ~15-30% per frame after.
     ma2_compile_model: bool = False
 
-    # ── Disk management ───────────────────────────────────────────
-    # Matte frames to accumulate before encoding a segment video and
-    # deleting the PNGs. Caps the matte-PNG pool at chunk_size × PNG.
-    # At 8K (5800×2900), each matte PNG ≈ 8 MB → 500 ≈ 4 GB peak.
-    # Source PNGs are deleted immediately after processing regardless.
+    # ── Disk management ───────────────────────────────────────
     chunk_size: int = 500
+
+    # ── GPU auto-config ───────────────────────────────────────
+    # Max frame pixels for matting. 0 = no limit.
+    # Auto-configured from GPU VRAM if not set manually.
+    max_matting_pixels: int = 0
+
+    # ── Resume ────────────────────────────────────────────────
+    # Save checkpoint after each segment for resume on restart.
+    auto_resume: bool = True
 
 
 @dataclass
@@ -132,6 +131,7 @@ class PipelineProgress:
     elapsed_sec: float = 0.0
     eta_sec: float = 0.0
     fps: float = 0.0
+    estimated_disk_gb: float = 0.0
 
 
 class Pipeline:
@@ -139,11 +139,13 @@ class Pipeline:
 
     Args:
         config: Pipeline configuration.
-        on_progress: Callback for progress updates (for live preview).
+        on_progress: Callback for progress updates.
     """
 
-    def __init__(self, config: PipelineConfig,
-                 on_progress: Callable[[PipelineProgress], None] | None = None):
+    def __init__(
+        self, config: PipelineConfig,
+        on_progress: Callable[[PipelineProgress], None] | None = None,
+    ):
         self.config = config
         self.on_progress = on_progress
         self._cancelled = False
@@ -157,17 +159,48 @@ class Pipeline:
     def _emit(self, progress: PipelineProgress) -> None:
         """Emit progress update if callback is set."""
         if self.on_progress:
-            progress.elapsed_sec = time.monotonic() - self._start_time
+            progress.elapsed_sec = (
+                time.monotonic() - self._start_time
+            )
             self.on_progress(progress)
 
+    # ── Extraction ────────────────────────────────────────────
+
+    def _extract_chunk(
+        self, input_path: Path, frames_dir: Path,
+        timestamp: float, num_frames: int,
+    ) -> list[Path]:
+        """Extract frames using fast keyframe seek.
+
+        Uses ``-ss`` before ``-i`` for keyframe-based seeking.
+        ~1-2 frame imprecision at chunk boundaries is acceptable
+        for VR content.
+        """
+        for f in frames_dir.glob("frame_*.png"):
+            try:
+                f.unlink()
+            except OSError:
+                pass
+
+        cmd = [
+            "ffmpeg", "-y",
+            "-ss", f"{timestamp:.6f}",
+            "-i", str(input_path),
+            "-frames:v", str(num_frames),
+            str(frames_dir / "frame_%06d.png"),
+        ]
+        subprocess.run(
+            cmd, check=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return sorted(frames_dir.glob("frame_*.png"))
+
     def _extract_frames_with_progress(
-        self,
-        cmd: list[str],
-        frames_dir: Path,
-        expected: int,
-        total_stages: int,
-    ) -> None:
-        """Run ffmpeg extraction while reporting frame progress.
+        self, cmd, frames_dir, expected, total_stages,
+    ):
+        """Run ffmpeg extraction with directory-polling progress.
 
         Runs ffmpeg with no pipe redirection (avoiding Windows
         pipe-buffer issues) and polls the output directory to
@@ -205,8 +238,7 @@ class Pipeline:
                     total_stages=total_stages,
                     frame_num=count,
                     total_frames=expected,
-                    fps=fps,
-                    eta_sec=eta,
+                    fps=fps, eta_sec=eta,
                 ))
 
         if process.returncode != 0:
@@ -215,15 +247,73 @@ class Pipeline:
                 f"(exit code {process.returncode})"
             )
 
-        # Emit final progress
         count = len(os.listdir(frames_dir))
         self._emit(PipelineProgress(
             stage="Extracting frames",
-            stage_num=1,
-            total_stages=total_stages,
-            frame_num=count,
-            total_frames=expected,
+            stage_num=1, total_stages=total_stages,
+            frame_num=count, total_frames=expected,
         ))
+
+    # ── GPU auto-config ──────────────────────────────────────
+
+    def _apply_gpu_config(
+        self, config: PipelineConfig,
+    ) -> dict:
+        """Apply GPU auto-configuration. Only overrides defaults."""
+        gpu_cfg = auto_configure_gpu()
+        defaults = PipelineConfig()
+
+        if config.max_matting_pixels == defaults.max_matting_pixels:
+            config.max_matting_pixels = (
+                gpu_cfg["max_matting_pixels"]
+            )
+        if config.ma2_internal_size == defaults.ma2_internal_size:
+            config.ma2_internal_size = (
+                gpu_cfg["ma2_internal_size"]
+            )
+        if config.ma2_mem_frames == defaults.ma2_mem_frames:
+            config.ma2_mem_frames = gpu_cfg["ma2_mem_frames"]
+        if config.downsample_ratio == defaults.downsample_ratio:
+            config.downsample_ratio = (
+                gpu_cfg["downsample_ratio"]
+            )
+        return gpu_cfg
+
+    # ── Temp directory management ────────────────────────────
+
+    def _setup_temp_dir(
+        self, config: PipelineConfig,
+        input_path: Path, cfg_hash: str,
+    ) -> tuple[Path, bool]:
+        """Create or locate the temp directory.
+
+        If auto_resume is True, uses a deterministic name so
+        the directory survives for resume.
+
+        Returns:
+            (temp_dir_path, is_deterministic)
+        """
+        if config.temp_dir:
+            tmp_base = Path(config.temp_dir)
+        else:
+            tmp_base = Path(tempfile.gettempdir())
+        tmp_base.mkdir(parents=True, exist_ok=True)
+
+        if config.auto_resume:
+            cleanup_stale_dirs(tmp_base)
+            name = deterministic_temp_name(
+                input_path, cfg_hash
+            )
+            tmp = tmp_base / name
+            tmp.mkdir(exist_ok=True)
+            return tmp, True
+
+        tmp = Path(tempfile.mkdtemp(
+            prefix="vrautomatte_", dir=str(tmp_base)
+        ))
+        return tmp, False
+
+    # ── Main pipeline ────────────────────────────────────────
 
     def run(self) -> Path:
         """Execute the full pipeline.
@@ -232,13 +322,13 @@ class Pipeline:
             Path to the final output file.
 
         Raises:
-            RuntimeError: If ffmpeg is not available or pipeline fails.
+            RuntimeError: If ffmpeg is not available or fails.
             InterruptedError: If cancelled by user.
         """
         if not check_ffmpeg():
             raise RuntimeError(
-                "FFmpeg not found. Please install FFmpeg and ensure "
-                "it is on your PATH."
+                "FFmpeg not found. Please install FFmpeg and "
+                "ensure it is on your PATH."
             )
 
         self._cancelled = False
@@ -251,33 +341,60 @@ class Pipeline:
         info = get_video_info(input_path)
         logger.info(
             f"Input: {input_path.name} — "
-            f"{info['width']}x{info['height']} @ {info['fps']}fps, "
-            f"{info['num_frames']} frames"
+            f"{info['width']}x{info['height']} @ "
+            f"{info['fps']}fps, {info['num_frames']} frames"
         )
 
-        tmp_kwargs = {"prefix": "vrautomatte_"}
-        if config.temp_dir:
-            tmp_base = Path(config.temp_dir)
-            tmp_base.mkdir(parents=True, exist_ok=True)
-            tmp_kwargs["dir"] = str(tmp_base)
+        # Auto-configure GPU-dependent settings
+        self._apply_gpu_config(config)
 
-        with tempfile.TemporaryDirectory(**tmp_kwargs) as tmpdir:
-            tmp = Path(tmpdir)
+        num_to_process = info["num_frames"]
+        if config.start_frame > 0 or config.end_frame > 0:
+            s = max(config.start_frame, 1)
+            e = config.end_frame or info["num_frames"]
+            num_to_process = min(
+                e, info["num_frames"]
+            ) - s + 1
+
+        # Setup temp directory (deterministic for resume)
+        cfg_hash = hash_config(config)
+        tmp, is_deterministic = self._setup_temp_dir(
+            config, input_path, cfg_hash
+        )
+
+        completed = False
+        try:
             frames_dir = tmp / "frames"
             mattes_dir = tmp / "mattes"
             segments_dir = tmp / "segments"
-            frames_dir.mkdir()
-            mattes_dir.mkdir()
-            segments_dir.mkdir()
+            for d in (frames_dir, mattes_dir, segments_dir):
+                d.mkdir(exist_ok=True)
 
-            # ── Pre-flight disk space check ──
-            num_to_process = info["num_frames"]
-            if config.start_frame > 0 or config.end_frame > 0:
-                s = max(config.start_frame, 1)
-                e = config.end_frame or info["num_frames"]
-                num_to_process = min(
-                    e, info["num_frames"]
-                ) - s + 1
+            # Check for resume checkpoint
+            resume_seg = 0
+            resume_frames = 0
+            if config.auto_resume and is_deterministic:
+                ckpt = PipelineCheckpoint.load(tmp)
+                if ckpt and ckpt.validate(
+                    input_path, cfg_hash
+                ):
+                    resume_seg = ckpt.completed_segments
+                    resume_frames = ckpt.completed_frames
+                    logger.info(
+                        f"Resuming from segment {resume_seg} "
+                        f"({resume_frames:,} frames done)"
+                    )
+                    self._emit(PipelineProgress(
+                        stage=(
+                            f"Resuming from segment "
+                            f"{resume_seg} "
+                            f"({resume_frames:,} frames done)"
+                        ),
+                        stage_num=2,
+                        total_stages=self._total_stages(),
+                    ))
+
+            # Pre-flight disk check
             estimated = self._estimate_disk_bytes(
                 info["width"], info["height"],
                 num_to_process,
@@ -293,85 +410,28 @@ class Pipeline:
                 f"Estimated temp space: {est_gb:.1f} GB"
             )
 
-            # ── Stage 1: Extract frames ──
+            # ── Stages 1+2: Chunked extract + matte ──
             total_stages = self._total_stages()
-            self._emit(PipelineProgress(
-                stage="Extracting frames", stage_num=1,
-                total_stages=total_stages,
-                total_frames=num_to_process,
-            ))
-            logger.info("Stage 1: Extracting frames...")
-
-            # Build ffmpeg extract command with optional range
-            extract_cmd = ["ffmpeg", "-y", "-i", str(input_path)]
-            has_range = (
-                config.start_frame > 0 or config.end_frame > 0
-            )
-            if has_range:
-                start = max(config.start_frame - 1, 0)
-                end = (
-                    config.end_frame
-                    if config.end_frame > 0
-                    else info["num_frames"]
-                )
-                end = min(end, info["num_frames"])
-                count = end - start
-                # Select frame range via video filter.
-                # -frames:v stops ffmpeg after outputting all
-                # selected frames instead of decoding the entire
-                # video (critical for large files).
-                extract_cmd += [
-                    "-vf",
-                    f"select='between(n\\,{start}\\,{end - 1})'",
-                    "-vsync", "vfr",
-                    "-frames:v", str(count),
-                ]
-                logger.info(
-                    f"Frame range: {start + 1}–{end} "
-                    f"({count} frames)"
-                )
-            extract_cmd.append(
-                str(frames_dir / "frame_%06d.png")
-            )
-
-            # Run ffmpeg and track extraction progress
-            self._extract_frames_with_progress(
-                extract_cmd, frames_dir, num_to_process,
-                total_stages,
-            )
-
-            frame_files = sorted(frames_dir.glob("*.png"))
-            total_frames = len(frame_files)
-            logger.info(f"Extracted {total_frames} frames")
-
-            # ── Stage 2: Generate mattes ──
-            logger.info("Stage 2: Generating AI mattes...")
             self._matte_start_time = time.monotonic()
 
-            # Determine if we should use SBS per-eye
-            use_sbs = config.is_sbs and detect_sbs(
-                info["width"], info["height"]
+            self._run_chunked_pipeline(
+                config, info, input_path,
+                frames_dir, mattes_dir, segments_dir,
+                num_to_process, total_stages,
+                fps_str=info["fps_str"],
+                resume_seg=resume_seg,
+                resume_frames=resume_frames,
+                cfg_hash=cfg_hash,
+                estimated_disk_gb=est_gb,
             )
 
-            if use_sbs:
-                self._run_sbs_matte_pass(
-                    config, frame_files, mattes_dir,
-                    segments_dir, total_frames, info["fps_str"],
-                )
-            else:
-                self._run_matte_pass(
-                    config, frame_files, mattes_dir,
-                    segments_dir, total_frames, info["fps_str"],
-                )
-
             # ── Stage 3: Concatenate matte segments ──
-            # Segment videos were encoded (and matte PNGs deleted)
-            # during Stage 2. Source PNGs were also deleted per-frame.
-            # This concat is fast — no re-encode, stream copy only.
-            logger.info("Stage 3: Concatenating matte segments...")
+            logger.info(
+                "Stage 3: Concatenating matte segments..."
+            )
             self._emit(PipelineProgress(
                 stage="Assembling matte video", stage_num=3,
-                total_stages=self._total_stages(),
+                total_stages=total_stages,
             ))
             matte_video = tmp / "matte.mp4"
             self._concat_matte_segments(
@@ -380,24 +440,32 @@ class Pipeline:
             )
 
             if config.output_format == OutputFormat.MATTE_ONLY:
-                # Copy matte and merge original audio into output
                 self._copy_with_audio(
                     matte_video, input_path, output_path
                 )
-                logger.info(f"Done! Matte saved to: {output_path}")
+                logger.info(
+                    f"Done! Matte saved to: {output_path}"
+                )
                 self._emit(PipelineProgress(
                     stage="Complete",
-                    stage_num=self._total_stages(),
-                    total_stages=self._total_stages(),
+                    stage_num=total_stages,
+                    total_stages=total_stages,
                 ))
+                completed = True
                 return output_path
 
             # ── Stage 4: Convert to fisheye ──
-            if config.projection == ProjectionType.EQUIRECTANGULAR:
-                logger.info("Stage 4: Converting to fisheye...")
+            if (
+                config.projection
+                == ProjectionType.EQUIRECTANGULAR
+            ):
+                logger.info(
+                    "Stage 4: Converting to fisheye..."
+                )
                 self._emit(PipelineProgress(
-                    stage="Converting to fisheye", stage_num=4,
-                    total_stages=self._total_stages(),
+                    stage="Converting to fisheye",
+                    stage_num=4,
+                    total_stages=total_stages,
                 ))
                 fisheye_video = tmp / "fisheye_video.mp4"
                 fisheye_matte = tmp / "fisheye_matte.mp4"
@@ -416,14 +484,18 @@ class Pipeline:
                 fisheye_video = input_path
                 fisheye_matte = matte_video
 
-            # ── Stage 5: Convert matte to red channel ──
-            logger.info("Stage 5: Converting matte to red channel...")
+            # ── Stage 5: Matte to red channel ──
+            logger.info(
+                "Stage 5: Converting matte to red channel..."
+            )
             self._emit(PipelineProgress(
                 stage="Packing alpha channel", stage_num=5,
-                total_stages=self._total_stages(),
+                total_stages=total_stages,
             ))
             red_matte = tmp / "matte_red.mp4"
-            matte_to_red_channel(fisheye_matte, red_matte, config.crf)
+            matte_to_red_channel(
+                fisheye_matte, red_matte, config.crf
+            )
 
             # ── Stage 6: Pack alpha ──
             logger.info("Stage 6: Packing video + alpha...")
@@ -432,21 +504,327 @@ class Pipeline:
                 config.codec, config.crf,
             )
 
-            logger.info(f"Done! Alpha-packed video: {output_path}")
+            logger.info(
+                f"Done! Alpha-packed video: {output_path}"
+            )
             self._emit(PipelineProgress(
                 stage="Complete",
-                stage_num=self._total_stages(),
-                total_stages=self._total_stages(),
+                stage_num=total_stages,
+                total_stages=total_stages,
             ))
+            completed = True
             return output_path
 
-    def _make_processor(self, config, first_frame: np.ndarray | None):
+        finally:
+            # Completed or non-resume: clean temp dir.
+            # Incomplete + resume: leave dir for resume.
+            if completed or not is_deterministic:
+                shutil.rmtree(tmp, ignore_errors=True)
+
+    # ── Chunked pipeline ─────────────────────────────────────
+
+    def _run_chunked_pipeline(
+        self, config, info, input_path,
+        frames_dir, mattes_dir, segments_dir,
+        num_to_process, total_stages,
+        *, fps_str, resume_seg=0, resume_frames=0,
+        cfg_hash="", estimated_disk_gb=0.0,
+    ):
+        """Run extraction and matting in interleaved chunks.
+
+        For each chunk:
+          1. Extract N frames via ffmpeg keyframe seek
+          2. Matte each frame, flush segment, delete PNGs
+          3. Save checkpoint for resume
+
+        Processor(s) are created once (from the first frame of
+        the first active chunk) and reused across all chunks.
+        Recurrent state carries across chunk boundaries.
+        """
+        fps = float(info["fps"])
+        start_frame_0based = 0
+        if config.start_frame > 0:
+            start_frame_0based = config.start_frame - 1
+
+        num_chunks = math.ceil(
+            num_to_process / config.chunk_size
+        )
+        use_sbs = config.is_sbs and detect_sbs(
+            info["width"], info["height"]
+        )
+
+        # Create scaler (per-eye dims for SBS)
+        if use_sbs:
+            eye_w = info["width"] // 2
+            scaler = FrameScaler(
+                config.max_matting_pixels,
+                (eye_w, info["height"]),
+            )
+        else:
+            scaler = FrameScaler(
+                config.max_matting_pixels,
+                (info["width"], info["height"]),
+            )
+
+        if scaler.active:
+            tw, th = scaler.target_size
+            self._emit(PipelineProgress(
+                stage=(
+                    f"Processing at {tw}x{th} "
+                    f"for your GPU"
+                ),
+                stage_num=2,
+                total_stages=total_stages,
+            ))
+
+        # Processor(s) — created lazily from first active chunk
+        processor = None
+        proc_l = None
+        proc_r = None
+
+        seg_idx = resume_seg
+        global_frame_idx = resume_frames
+
+        try:
+            for chunk_idx in range(num_chunks):
+                chunk_offset = chunk_idx * config.chunk_size
+                if chunk_offset < resume_frames:
+                    continue
+
+                if self._cancelled:
+                    raise InterruptedError(
+                        "Pipeline cancelled by user"
+                    )
+
+                # Extract this chunk
+                chunk_start = (
+                    start_frame_0based + chunk_offset
+                )
+                chunk_frames = min(
+                    config.chunk_size,
+                    num_to_process - chunk_offset,
+                )
+                ts = (
+                    chunk_start / fps if fps > 0 else 0
+                )
+                logger.info(
+                    f"Extracting chunk "
+                    f"{chunk_idx + 1}/{num_chunks} "
+                    f"({chunk_frames} frames)..."
+                )
+                self._emit(PipelineProgress(
+                    stage=(
+                        f"Extracting chunk "
+                        f"{chunk_idx + 1}/{num_chunks}"
+                    ),
+                    stage_num=1,
+                    total_stages=total_stages,
+                    frame_num=global_frame_idx,
+                    total_frames=num_to_process,
+                ))
+
+                frame_files = self._extract_chunk(
+                    input_path, frames_dir,
+                    ts, chunk_frames,
+                )
+
+                if not frame_files:
+                    logger.warning(
+                        f"Chunk {chunk_idx + 1} extracted "
+                        f"0 frames, skipping"
+                    )
+                    continue
+
+                # ── Create processor(s) on first chunk ──
+                needs_first = (
+                    config.model_variant == "matanyone2"
+                    or config.pov_mode
+                )
+
+                if use_sbs and proc_l is None:
+                    self._init_sbs_processors(
+                        config, frame_files[0],
+                        scaler, needs_first,
+                    )
+                    proc_l = self._proc_l
+                    proc_r = self._proc_r
+                elif not use_sbs and processor is None:
+                    first_arr = np.array(
+                        Image.open(
+                            frame_files[0]
+                        ).convert("RGB")
+                    )
+                    first_seed = (
+                        scaler.downscale(first_arr)
+                        if needs_first else None
+                    )
+                    del first_arr
+                    processor = self._make_processor(
+                        config, first_seed
+                    )
+
+                # ── Process this chunk's frames ──
+                seg_frame = 0
+                for i, frame_file in enumerate(frame_files):
+                    if self._cancelled:
+                        raise InterruptedError(
+                            "Pipeline cancelled by user"
+                        )
+
+                    if i % _DISK_CHECK_INTERVAL == 0:
+                        self._check_disk_free(mattes_dir)
+
+                    frame_arr = np.array(
+                        Image.open(
+                            frame_file
+                        ).convert("RGB")
+                    )
+
+                    if use_sbs:
+                        matte_arr = self._process_sbs_frame(
+                            frame_arr, proc_l, proc_r, scaler,
+                        )
+                    else:
+                        scaled = scaler.downscale(frame_arr)
+                        matte_arr = processor.process_frame(
+                            scaled
+                        )
+                        matte_arr = scaler.upscale_matte(
+                            matte_arr
+                        )
+                        del scaled
+
+                    seg_frame += 1
+                    Image.fromarray(
+                        matte_arr, mode="L"
+                    ).save(
+                        mattes_dir
+                        / f"frame_{seg_frame:06d}.png"
+                    )
+
+                    try:
+                        frame_file.unlink()
+                    except OSError:
+                        pass
+
+                    global_frame_idx += 1
+                    stage = (
+                        "Matting SBS (L+R)"
+                        if use_sbs
+                        else "Generating mattes"
+                    )
+                    self._emit_matte_progress(
+                        global_frame_idx - 1,
+                        num_to_process,
+                        frame_arr, matte_arr,
+                        stage=stage,
+                        estimated_disk_gb=estimated_disk_gb,
+                    )
+                    del frame_arr, matte_arr
+
+                # Flush segment
+                if seg_frame > 0:
+                    self._flush_matte_segment(
+                        mattes_dir, segments_dir, seg_idx,
+                        fps_str=fps_str, crf=config.crf,
+                    )
+                    seg_idx += 1
+
+                    # Save checkpoint
+                    if config.auto_resume and cfg_hash:
+                        ckpt = PipelineCheckpoint(
+                            input_path=str(input_path),
+                            input_hash=hash_file_head(
+                                input_path
+                            ),
+                            config_hash=cfg_hash,
+                            total_frames=num_to_process,
+                            chunk_size=config.chunk_size,
+                            completed_segments=seg_idx,
+                            completed_frames=global_frame_idx,
+                            timestamp=time.strftime(
+                                "%Y-%m-%dT%H:%M:%S"
+                            ),
+                        )
+                        ckpt.save(segments_dir.parent)
+
+                # Clear VRAM between chunks
+                try:
+                    import torch
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                except ImportError:
+                    pass
+                gc.collect()
+
+        finally:
+            if use_sbs:
+                if proc_l is not None:
+                    proc_l.cleanup()
+                if proc_r is not None:
+                    proc_r.cleanup()
+            elif processor is not None:
+                processor.cleanup()
+
+    def _init_sbs_processors(
+        self, config, first_frame_path, scaler, needs_first,
+    ):
+        """Create left/right eye processors for SBS mode."""
+        logger.info("SBS mode: processing per-eye")
+        first_full = np.array(
+            Image.open(first_frame_path).convert("RGB")
+        )
+        left_f, right_f = split_frame(first_full)
+        del first_full
+
+        if needs_first:
+            left_seed = scaler.downscale(left_f)
+            right_seed = scaler.downscale(right_f)
+        else:
+            left_seed = None
+            right_seed = None
+        del left_f, right_f
+
+        logger.info(
+            "SBS: initialising left-eye processor..."
+        )
+        self._proc_l = self._make_processor(
+            config, left_seed
+        )
+        logger.info(
+            "SBS: initialising right-eye processor..."
+        )
+        self._proc_r = self._make_processor(
+            config, right_seed
+        )
+
+    @staticmethod
+    def _process_sbs_frame(frame_arr, proc_l, proc_r, scaler):
+        """Process one SBS frame through both eye processors."""
+        left, right = split_frame(frame_arr)
+        left = scaler.downscale(left)
+        right = scaler.downscale(right)
+
+        left_m = proc_l.process_frame(left)
+        right_m = proc_r.process_frame(right)
+
+        left_m = scaler.upscale_matte(left_m)
+        right_m = scaler.upscale_matte(right_m)
+
+        matte = merge_mattes(left_m, right_m)
+        del left, right, left_m, right_m
+        return matte
+
+    # ── Processor creation ───────────────────────────────────
+
+    def _make_processor(self, config, first_frame):
         """Create a matting processor from config.
 
         Args:
             config: Pipeline configuration.
             first_frame: First video frame as uint8 RGB array.
-                Required for matanyone2 and pov_mode; None otherwise.
+                Required for matanyone2 and pov_mode; None
+                otherwise.
         """
         needs_first_frame = (
             config.model_variant == "matanyone2"
@@ -462,7 +840,9 @@ class Pipeline:
         return create_processor(
             variant=config.model_variant,
             downsample_ratio=config.downsample_ratio,
-            first_frame=first_frame if needs_first_frame else None,
+            first_frame=(
+                first_frame if needs_first_frame else None
+            ),
             pov_mode=config.pov_mode,
             use_fp16=config.use_fp16,
             max_internal_size=config.ma2_internal_size,
@@ -471,193 +851,19 @@ class Pipeline:
             compile_model=config.ma2_compile_model,
         )
 
-    def _run_matte_pass(
-        self, config, frame_files, mattes_dir,
-        segments_dir, total_frames, fps_str,
-    ):
-        """Run matting on all frames (non-SBS path).
-
-        Source PNGs are deleted immediately after each frame is
-        processed.  Matte PNGs are flushed to a segment video every
-        ``config.chunk_size`` frames, then deleted — keeping the
-        matte-PNG pool bounded regardless of video length.
-        """
-        first_frame = np.array(
-            Image.open(frame_files[0]).convert("RGB")
-        )
-        processor = self._make_processor(config, first_frame)
-
-        seg_idx = 0          # segment video counter
-        seg_frame = 0        # frames written into current segment
-
-        for i, frame_file in enumerate(frame_files):
-            if self._cancelled:
-                processor.cleanup()
-                raise InterruptedError(
-                    "Pipeline cancelled by user"
-                )
-
-            if i % _DISK_CHECK_INTERVAL == 0:
-                self._check_disk_free(mattes_dir)
-
-            frame_arr = np.array(
-                Image.open(frame_file).convert("RGB")
-            )
-            matte_arr = processor.process_frame(frame_arr)
-
-            # Save matte PNG with a local (per-segment) index so
-            # ffmpeg's image2 demuxer sees a gapless sequence.
-            seg_frame += 1
-            Image.fromarray(matte_arr, mode="L").save(
-                mattes_dir / f"frame_{seg_frame:06d}.png"
-            )
-
-            # Delete source PNG immediately — no longer needed.
-            try:
-                frame_file.unlink()
-            except OSError:
-                pass
-
-            self._emit_matte_progress(
-                i, total_frames, frame_arr, matte_arr
-            )
-
-            # Flush segment when chunk is full or on the last frame.
-            if seg_frame >= config.chunk_size or i == total_frames - 1:
-                self._flush_matte_segment(
-                    mattes_dir, segments_dir, seg_idx,
-                    fps_str=fps_str,
-                    crf=config.crf,
-                )
-                seg_idx += 1
-                seg_frame = 0
-
-        processor.cleanup()
-
-    def _run_sbs_matte_pass(
-        self, config, frame_files, mattes_dir,
-        segments_dir, total_frames, fps_str,
-    ):
-        """Run per-eye matting on SBS stereo frames.
-
-        Processes both eyes together, one frame at a time:
-
-            for each frame:
-                split → left / right
-                left_matte  = proc_l.process_frame(left)
-                right_matte = proc_r.process_frame(right)
-                merged = merge_mattes(left_matte, right_matte)
-                save merged PNG → mattes_dir
-                delete source PNG immediately
-                discard all intermediate arrays
-
-        Every ``config.chunk_size`` merged mattes, encode a segment
-        video and delete the matte PNGs — keeping the pool bounded.
-
-        Both InferenceCore instances live on the same GPU and take
-        turns — no GPU contention because process_frame() is called
-        sequentially, not concurrently.
-        """
-        logger.info("SBS mode: processing per-eye (interleaved)")
-
-        needs_first = (
-            config.model_variant == "matanyone2"
-            or config.pov_mode
-        )
-
-        # Load only the first frame to seed both processors.
-        first_full = np.array(
-            Image.open(frame_files[0]).convert("RGB")
-        )
-        left_first, right_first = split_frame(first_full)
-        del first_full
-
-        logger.info("SBS: initialising left-eye processor...")
-        proc_l = self._make_processor(
-            config, left_first if needs_first else None
-        )
-        logger.info("SBS: initialising right-eye processor...")
-        proc_r = self._make_processor(
-            config, right_first if needs_first else None
-        )
-        del left_first, right_first
-
-        seg_idx = 0
-        seg_frame = 0
-
-        # ── Per-frame interleaved loop ───────────────────────────
-        for i, frame_file in enumerate(frame_files):
-            if self._cancelled:
-                proc_l.cleanup()
-                proc_r.cleanup()
-                raise InterruptedError(
-                    "Pipeline cancelled by user"
-                )
-
-            if i % _DISK_CHECK_INTERVAL == 0:
-                self._check_disk_free(mattes_dir)
-
-            full = np.array(
-                Image.open(frame_file).convert("RGB")
-            )
-            left, right = split_frame(full)
-
-            left_matte  = proc_l.process_frame(left)
-            right_matte = proc_r.process_frame(right)
-            merged = merge_mattes(left_matte, right_matte)
-
-            seg_frame += 1
-            Image.fromarray(merged, mode="L").save(
-                mattes_dir / f"frame_{seg_frame:06d}.png"
-            )
-
-            # Delete source PNG immediately.
-            try:
-                frame_file.unlink()
-            except OSError:
-                pass
-
-            self._emit_matte_progress(
-                i, total_frames, full, merged,
-                stage="Matting SBS (L+R)",
-            )
-
-            del full, left, right, left_matte, right_matte, merged
-
-            if seg_frame >= config.chunk_size or i == total_frames - 1:
-                self._flush_matte_segment(
-                    mattes_dir, segments_dir, seg_idx,
-                    fps_str=fps_str,
-                    crf=config.crf,
-                )
-                seg_idx += 1
-                seg_frame = 0
-
-        proc_l.cleanup()
-        proc_r.cleanup()
+    # ── Segment management ───────────────────────────────────
 
     def _flush_matte_segment(
-        self,
-        mattes_dir: Path,
-        segments_dir: Path,
-        seg_idx: int,
-        fps_str: str,
-        crf: int,
-    ) -> None:
-        """Encode all PNGs in mattes_dir into a segment video, then delete them.
+        self, mattes_dir, segments_dir, seg_idx,
+        fps_str, crf,
+    ):
+        """Encode PNGs into a segment video, then delete them.
 
-        Uses libx264 with yuv420p for broad compatibility with the
-        concat step.  The encode is fast because the input frames are
-        already at matte resolution (grayscale, single channel).
-
-        Args:
-            mattes_dir: Directory containing frame_%06d.png files.
-            segments_dir: Where to write the segment .mp4 file.
-            seg_idx: Segment number (used for the output filename).
-            fps_str: Frame-rate string (e.g. "60000/1001") from ffprobe.
-            crf: Quality setting for the segment encode.
+        Uses libx264 with yuv420p for broad concat compatibility.
         """
-        segment_path = segments_dir / f"segment_{seg_idx:06d}.mp4"
+        segment_path = (
+            segments_dir / f"segment_{seg_idx:06d}.mp4"
+        )
         subprocess.run([
             "ffmpeg", "-y",
             "-framerate", fps_str,
@@ -668,7 +874,6 @@ class Pipeline:
         ], check=True, stdin=subprocess.DEVNULL,
            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-        # Delete all PNGs — segment video is the canonical record now.
         for png in mattes_dir.glob("frame_*.png"):
             try:
                 png.unlink()
@@ -676,46 +881,35 @@ class Pipeline:
                 pass
 
         logger.debug(
-            f"Flushed segment {seg_idx} → {segment_path.name}"
+            f"Flushed segment {seg_idx} -> "
+            f"{segment_path.name}"
         )
 
     def _concat_matte_segments(
-        self,
-        segments_dir: Path,
-        output_path: Path,
-        fps_str: str,
-        crf: int,
-    ) -> None:
-        """Concatenate all segment videos into a single matte video.
+        self, segments_dir, output_path, fps_str, crf,
+    ):
+        """Concatenate segment videos via concat demuxer.
 
-        Uses the ffmpeg concat demuxer with stream-copy — no re-encode,
-        so this step is fast regardless of total frame count.
-
-        Falls back to a single-segment copy if only one segment exists.
-
-        Args:
-            segments_dir: Directory containing segment_NNNNNN.mp4 files.
-            output_path: Destination matte video path.
-            fps_str: Frame-rate string (passed through for single-file case).
-            crf: Unused here but kept for signature consistency.
+        Uses stream copy — no re-encode, fast regardless of
+        total frame count.
         """
         segments = sorted(segments_dir.glob("segment_*.mp4"))
         if not segments:
             raise RuntimeError(
-                "No matte segments found — matting stage may have failed."
+                "No matte segments found — matting "
+                "stage may have failed."
             )
 
         if len(segments) == 1:
-            # Single segment: just rename/copy.
             shutil.copy2(segments[0], output_path)
             return
 
-        # Write a concat list file that ffmpeg can read.
         concat_list = segments_dir / "concat_list.txt"
         with concat_list.open("w") as f:
             for seg in segments:
-                # ffmpeg requires forward slashes and escaped single quotes.
-                safe = str(seg).replace("\\", "/").replace("'", "\'")
+                safe = str(seg).replace(
+                    "\\", "/"
+                ).replace("'", "\'")
                 f.write(f"file '{safe}'\n")
 
         subprocess.run([
@@ -729,12 +923,16 @@ class Pipeline:
 
         concat_list.unlink(missing_ok=True)
         logger.info(
-            f"Concatenated {len(segments)} segments → {output_path.name}"
+            f"Concatenated {len(segments)} segments "
+            f"-> {output_path.name}"
         )
+
+    # ── Progress ─────────────────────────────────────────────
 
     def _emit_matte_progress(
         self, i, total, source, matte,
         stage="Generating mattes",
+        estimated_disk_gb=0.0,
     ):
         """Emit progress during matting (every 10 frames)."""
         if i % 10 != 0 and i != total - 1:
@@ -749,16 +947,16 @@ class Pipeline:
             frame_num=i + 1, total_frames=total,
             source_frame=source, matte_frame=matte,
             eta_sec=eta, fps=fps,
+            estimated_disk_gb=estimated_disk_gb,
         ))
 
-    def _copy_with_audio(self, video_path: Path,
-                         audio_source: Path, output_path: Path) -> None:
-        """Copy video and mux audio from the original source.
+    # ── Audio / output ───────────────────────────────────────
 
-        If the original has no audio track, just copies the video.
-        """
+    def _copy_with_audio(
+        self, video_path, audio_source, output_path,
+    ):
+        """Copy video and mux audio from the original source."""
         try:
-            # Try muxing audio from original
             subprocess.run([
                 "ffmpeg", "-y",
                 "-i", str(video_path),
@@ -769,80 +967,62 @@ class Pipeline:
                 str(output_path),
             ], capture_output=True, check=True)
         except subprocess.CalledProcessError:
-            # No audio track — just copy video
-            logger.debug("No audio track found, copying video only")
+            logger.debug(
+                "No audio track found, copying video only"
+            )
             shutil.copy2(video_path, output_path)
 
-    def _total_stages(self) -> int:
+    def _total_stages(self):
         """Calculate total stages based on config."""
         if self.config.output_format == OutputFormat.MATTE_ONLY:
-            return 3  # extract, matte, assemble
+            return 3  # extract+matte, assemble
         return 6  # + fisheye convert, red channel, pack
+
+    # ── Disk management ──────────────────────────────────────
 
     @staticmethod
     def _estimate_disk_bytes(
-        width: int, height: int, num_frames: int,
-        is_deovr: bool = False,
-        chunk_size: int = 500,
-    ) -> int:
-        """Estimate peak temp disk space in bytes under the chunked pipeline.
+        width, height, num_frames,
+        is_deovr=False, chunk_size=500,
+    ):
+        """Estimate peak temp disk under the chunked pipeline.
 
-        Storage model:
-        - Source PNGs: all extracted upfront, deleted one-by-one during
-          the matte pass.  Peak = all num_frames × source_png_size.
-        - Matte PNGs: at most chunk_size live on disk at any time before
-          they are flushed to a segment video and deleted.
-        - Segment videos: all segments accumulate until the concat step.
-          Encoded H.264 at CRF 18 ≈ 5–8 % of raw uncompressed size.
-        - DeoVR pipeline adds an extra fisheye video + red-channel matte.
-
-        Args:
-            width: Video width in pixels.
-            height: Video height in pixels.
-            num_frames: Total frames to process.
-            is_deovr: True when producing DeoVR alpha-packed output.
-            chunk_size: Matte frames per segment (from PipelineConfig).
-
-        Returns:
-            Estimated peak bytes needed.
+        With chunked extraction, only chunk_size source PNGs
+        exist at any time (vs all frames in the old pipeline).
+        Matte PNGs are also capped at chunk_size.
         """
-        # Source PNGs (RGB, compressed ≈ 50 % of raw).
-        source_png_per_frame = int(width * height * 3 * 0.5)
-        all_source_pngs = source_png_per_frame * num_frames
+        # Source PNGs: only chunk_size live at once
+        source_png = int(width * height * 3 * 0.5)
+        all_source = source_png * min(
+            num_frames, chunk_size
+        )
 
-        # Matte PNGs (grayscale, compressed ≈ 50 % of raw).
-        matte_png_per_frame = int(width * height * 1 * 0.5)
-        peak_matte_pngs = matte_png_per_frame * chunk_size
+        # Matte PNGs: at most chunk_size on disk
+        matte_png = int(width * height * 1 * 0.5)
+        peak_mattes = matte_png * chunk_size
 
-        # Segment videos: all N segments exist simultaneously until
-        # concat finishes.  H.264 CRF-18 ≈ 6 % of raw uncompressed.
-        raw_matte_per_frame = width * height  # 1 byte grayscale
-        all_segments = int(raw_matte_per_frame * num_frames * 0.06)
+        # Segment videos: all accumulate until concat
+        raw_matte = width * height
+        all_segments = int(
+            raw_matte * num_frames * 0.06
+        )
 
-        # DeoVR adds a fisheye video + red-channel matte video.
+        # DeoVR overhead
         deovr_overhead = (
-            int(width * height * 3 * num_frames * 0.06) * 2
-            if is_deovr else 0
+            int(width * height * 3 * num_frames * 0.06)
+            * 2 if is_deovr else 0
         )
 
         return (
-            all_source_pngs
-            + peak_matte_pngs
+            all_source
+            + peak_mattes
             + all_segments
             + deovr_overhead
         )
 
     @staticmethod
-    def _check_disk_space(path: Path, required: int) -> None:
-        """Raise if the drive has less than required + safety margin.
-
-        Args:
-            path: Any path on the target drive.
-            required: Estimated bytes needed for the operation.
-
-        Raises:
-            RuntimeError: If insufficient disk space.
-        """
+    def _check_disk_space(path, required):
+        """Raise if drive has less than required + margin."""
         free = shutil.disk_usage(path).free
         needed = required + _MIN_FREE_BYTES
         if free < needed:
@@ -857,23 +1037,15 @@ class Pipeline:
             )
 
     @staticmethod
-    def _check_disk_free(path: Path) -> None:
-        """Raise if free space drops below the safety margin.
-
-        Called periodically during processing to prevent
-        filling the drive.
-
-        Args:
-            path: Any path on the target drive.
-
-        Raises:
-            RuntimeError: If free space is critically low.
-        """
+    def _check_disk_free(path):
+        """Raise if free space drops below safety margin."""
         free = shutil.disk_usage(path).free
         if free < _MIN_FREE_BYTES:
             free_mb = free / (1024 ** 2)
             raise RuntimeError(
-                f"Disk space critically low ({free_mb:.0f} MB "
-                f"remaining). Processing stopped to prevent "
-                f"filling the drive. Free up space and retry."
+                f"Disk space critically low "
+                f"({free_mb:.0f} MB remaining). "
+                f"Processing stopped to prevent "
+                f"filling the drive. Free up space "
+                f"and retry."
             )

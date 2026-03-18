@@ -25,6 +25,8 @@ _DEFAULTS = {
     "window_height": 780,
     "fisheye_mask_path": "",
     "temp_dir": "",              # Custom temp directory (empty = system default)
+    "chunk_size": 2,             # Combo index: 0=100, 1=250, 2=500, 3=1000
+    "auto_resume": True,         # Save checkpoint for resume on restart
 }
 
 

@@ -8,6 +8,8 @@ GPU memory strategy: SAM2 loads, generates masks from frame 1,
 then unloads before the matting model loads (D003).
 """
 
+import gc
+
 import numpy as np
 import torch
 from loguru import logger
@@ -203,6 +205,7 @@ def _run_sam2_masks(
     masks = mask_gen.generate(frame)
 
     del mask_gen, predictor
+    gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
     logger.debug("SAM2 unloaded, GPU memory freed")
