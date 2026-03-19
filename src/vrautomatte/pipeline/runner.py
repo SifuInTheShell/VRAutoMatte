@@ -30,9 +30,10 @@ from vrautomatte.pipeline.checkpoint import (
     hash_config,
     hash_file_head,
 )
-from vrautomatte.pipeline.matte import create_processor
+from vrautomatte.pipeline.matte import AlphaSmoother, create_processor
 from vrautomatte.pipeline.scaler import FrameScaler
 from vrautomatte.utils.ffmpeg import (
+    apply_fisheye_mask,
     check_ffmpeg,
     convert_to_fisheye,
     get_video_info,
@@ -104,6 +105,10 @@ class PipelineConfig:
     ma2_mem_frames: int = 3
     ma2_use_long_term: bool = True
     ma2_compile_model: bool = False
+
+    # ── Temporal smoothing ──────────────────────────────────────
+    # EMA weight for alpha smoothing (1.0 = off).
+    temporal_smoothing: float = 1.0
 
     # ── Disk management ───────────────────────────────────────
     chunk_size: int = 500
@@ -183,8 +188,10 @@ class Pipeline:
             except OSError:
                 pass
 
+        from vrautomatte.utils.ffmpeg import _hwaccel_args
         cmd = [
             "ffmpeg", "-y",
+            *_hwaccel_args(),
             "-ss", f"{timestamp:.6f}",
             "-i", str(input_path),
             "-frames:v", str(num_frames),
@@ -443,6 +450,8 @@ class Pipeline:
             estimated = self._estimate_disk_bytes(
                 info["width"], info["height"],
                 num_to_process,
+                total_frames=info["num_frames"],
+                input_size=input_path.stat().st_size,
                 is_deovr=(
                     config.output_format
                     == OutputFormat.DEOVR_ALPHA
@@ -512,41 +521,118 @@ class Pipeline:
                     stage_num=4,
                     total_stages=total_stages,
                 ))
+
+                # Trim source to the processed frame range so
+                # we don't re-encode the entire original video.
+                trimmed_src = tmp / "source_trimmed.mp4"
+                fps = info["fps"]
+                start_0 = 0
+                if config.start_frame > 0:
+                    start_0 = config.start_frame - 1
+                ss_sec = start_0 / fps
+                dur_sec = num_to_process / fps
+
+                from vrautomatte.utils.ffmpeg import (
+                    _hwaccel_args,
+                    _run_ffmpeg_logged,
+                )
+                trim_cmd = [
+                    "ffmpeg", "-y",
+                    *_hwaccel_args(),
+                    "-ss", f"{ss_sec:.4f}",
+                    "-i", str(input_path),
+                    "-t", f"{dur_sec:.4f}",
+                    "-c", "copy",
+                    str(trimmed_src),
+                ]
+                logger.info(
+                    f"Trimming source to "
+                    f"{num_to_process} frames "
+                    f"(ss={ss_sec:.1f}s, dur={dur_sec:.1f}s)"
+                )
+                _run_ffmpeg_logged(
+                    trim_cmd, "trim-source",
+                    total_frames=num_to_process,
+                )
+
                 fisheye_video = tmp / "fisheye_video.mp4"
                 fisheye_matte = tmp / "fisheye_matte.mp4"
 
                 convert_to_fisheye(
-                    input_path, config.fisheye_mask_path,
+                    trimmed_src, config.fisheye_mask_path,
                     fisheye_video, config.fisheye_fov,
                     config.codec, config.crf,
                 )
                 convert_to_fisheye(
-                    matte_video, config.fisheye_mask_path,
+                    matte_video, None,
                     fisheye_matte, config.fisheye_fov,
-                    "libx264", config.crf,
+                    config.codec, config.crf,
                 )
+
+                # Clean up trimmed source
+                try:
+                    trimmed_src.unlink()
+                except OSError:
+                    pass
             else:
-                fisheye_video = input_path
+                # Already fisheye — trim source to match the
+                # matte's frame range, then apply mask to clean
+                # up pixels outside the circular fisheye area.
+                fps = info["fps"]
+                start_0 = 0
+                if config.start_frame > 0:
+                    start_0 = config.start_frame - 1
+                ss_sec = start_0 / fps
+                dur_sec = num_to_process / fps
+
+                needs_trim = (
+                    config.start_frame > 0
+                    or config.end_frame > 0
+                )
+                if needs_trim:
+                    from vrautomatte.utils.ffmpeg import (
+                        _hwaccel_args,
+                        _run_ffmpeg_logged,
+                    )
+                    trimmed_src = tmp / "source_trimmed.mp4"
+                    trim_cmd = [
+                        "ffmpeg", "-y",
+                        *_hwaccel_args(),
+                        "-ss", f"{ss_sec:.4f}",
+                        "-i", str(input_path),
+                        "-t", f"{dur_sec:.4f}",
+                        "-c", "copy",
+                        str(trimmed_src),
+                    ]
+                    logger.info(
+                        f"Trimming fisheye source to "
+                        f"{num_to_process} frames"
+                    )
+                    _run_ffmpeg_logged(
+                        trim_cmd, "trim-fisheye",
+                        total_frames=num_to_process,
+                    )
+                    src_video = trimmed_src
+                else:
+                    src_video = input_path
+
+                # Already-fisheye content fills the entire frame —
+                # the DeoVR mask is only for equirect→fisheye
+                # conversion artifacts, not native fisheye video.
+                fisheye_video = src_video
                 fisheye_matte = matte_video
 
-            # ── Stage 5: Matte to red channel ──
+            # ── Stage 5: Pack alpha into video ──
             logger.info(
-                "Stage 5: Converting matte to red channel..."
+                "Stage 5: Compositing alpha into video..."
             )
             self._emit(PipelineProgress(
                 stage="Packing alpha channel", stage_num=5,
                 total_stages=total_stages,
             ))
-            red_matte = tmp / "matte_red.mp4"
-            matte_to_red_channel(
-                fisheye_matte, red_matte, config.crf
-            )
-
-            # ── Stage 6: Pack alpha ──
-            logger.info("Stage 6: Packing video + alpha...")
             pack_alpha(
-                fisheye_video, red_matte, output_path,
-                config.codec, config.crf,
+                fisheye_video, fisheye_matte, output_path,
+                "libsvtav1", config.crf,
             )
 
             logger.info(
@@ -882,7 +968,7 @@ class Pipeline:
                 total_stages=self._total_stages(),
             ))
 
-        return create_processor(
+        processor = create_processor(
             variant=config.model_variant,
             downsample_ratio=config.downsample_ratio,
             first_frame=(
@@ -895,6 +981,17 @@ class Pipeline:
             use_long_term=config.ma2_use_long_term,
             compile_model=config.ma2_compile_model,
         )
+
+        if config.temporal_smoothing < 1.0:
+            processor = AlphaSmoother(
+                processor, weight=config.temporal_smoothing
+            )
+            logger.info(
+                f"Temporal smoothing enabled "
+                f"(weight={config.temporal_smoothing})"
+            )
+
+        return processor
 
     # ── Segment management ───────────────────────────────────
 
@@ -909,15 +1006,36 @@ class Pipeline:
         segment_path = (
             segments_dir / f"segment_{seg_idx:06d}.mp4"
         )
-        subprocess.run([
+        from vrautomatte.utils.ffmpeg import _encode_args
+        base = [
             "ffmpeg", "-y",
             "-framerate", fps_str,
             "-i", str(mattes_dir / "frame_%06d.png"),
-            "-c:v", "libx264", "-crf", str(crf),
-            "-pix_fmt", "yuv420p",
-            str(segment_path),
-        ], check=True, stdin=subprocess.DEVNULL,
-           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        ]
+        tail = ["-pix_fmt", "yuv420p", str(segment_path)]
+        devnull = dict(
+            check=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            subprocess.run(
+                base + _encode_args("libx264", crf) + tail,
+                **devnull,
+            )
+        except subprocess.CalledProcessError:
+            # NVENC may fail when the GPU is busy with the
+            # matting model — fall back to CPU encoding.
+            logger.warning(
+                "NVENC failed for segment encode, "
+                "falling back to CPU libx264"
+            )
+            subprocess.run(
+                base + ["-c:v", "libx264", "-crf", str(crf)]
+                + tail,
+                **devnull,
+            )
 
         for png in mattes_dir.glob("frame_*.png"):
             try:
@@ -1010,7 +1128,10 @@ class Pipeline:
                 "-map", "0:v:0", "-map", "1:a:0?",
                 "-shortest",
                 str(output_path),
-            ], capture_output=True, check=True)
+            ], check=True,
+               stdin=subprocess.DEVNULL,
+               stdout=subprocess.DEVNULL,
+               stderr=subprocess.DEVNULL)
         except subprocess.CalledProcessError:
             logger.debug(
                 "No audio track found, copying video only"
@@ -1028,42 +1149,39 @@ class Pipeline:
     @staticmethod
     def _estimate_disk_bytes(
         width, height, num_frames,
+        total_frames=0, input_size=0,
         is_deovr=False, chunk_size=500,
     ):
         """Estimate peak temp disk under the chunked pipeline.
 
-        With chunked extraction, only chunk_size source PNGs
-        exist at any time (vs all frames in the old pipeline).
-        Matte PNGs are also capped at chunk_size.
+        Uses the actual input file size to estimate compressed
+        video sizes instead of guessing compression ratios.
+
+        Peak = per-chunk PNGs + proportional input file size
+        (for intermediates like fisheye conversions / matte video).
         """
-        # Source PNGs: only chunk_size live at once
+        # Per-chunk source PNGs (deleted as matted, peak at
+        # the start of each chunk before matting begins)
         source_png = int(width * height * 3 * 0.5)
-        all_source = source_png * min(
-            num_frames, chunk_size
-        )
+        chunk_pngs = source_png * min(num_frames, chunk_size)
 
-        # Matte PNGs: at most chunk_size on disk
-        matte_png = int(width * height * 1 * 0.5)
-        peak_mattes = matte_png * chunk_size
+        # Proportional input size for the processed range
+        if total_frames > 0 and input_size > 0:
+            frac = min(num_frames / total_frames, 1.0)
+            proportional = int(input_size * frac)
+        else:
+            # Fallback: estimate ~6% of raw frame data
+            proportional = int(
+                width * height * 3 * num_frames * 0.06
+            )
 
-        # Segment videos: all accumulate until concat
-        raw_matte = width * height
-        all_segments = int(
-            raw_matte * num_frames * 0.06
-        )
+        # Intermediates scale with the proportional size:
+        # segments + matte.mp4 ≈ 1× proportional (grayscale)
+        # DeoVR adds fisheye_video + fisheye_matte ≈ 2×
+        multiplier = 3 if is_deovr else 1
+        intermediates = proportional * multiplier
 
-        # DeoVR overhead
-        deovr_overhead = (
-            int(width * height * 3 * num_frames * 0.06)
-            * 2 if is_deovr else 0
-        )
-
-        return (
-            all_source
-            + peak_mattes
-            + all_segments
-            + deovr_overhead
-        )
+        return chunk_pngs + intermediates
 
     @staticmethod
     def _check_disk_space(path, required):

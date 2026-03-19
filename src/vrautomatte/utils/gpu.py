@@ -97,28 +97,28 @@ def auto_configure_gpu() -> dict:
         device_type = "mps"
         vram_gb = 16.0  # Assume 16 GB shared memory
 
-    if vram_gb >= 24:
+    if vram_gb >= 23:
         cfg = {
             "max_matting_pixels": 0,
             "ma2_internal_size": 480,
             "ma2_mem_frames": 5,
             "downsample_ratio": 0.25,
         }
-    elif vram_gb >= 16:
+    elif vram_gb >= 15:
         cfg = {
             "max_matting_pixels": 1920 * 1080,
             "ma2_internal_size": 480,
             "ma2_mem_frames": 3,
-            "downsample_ratio": 0.125,
+            "downsample_ratio": 0.25,
         }
-    elif vram_gb >= 12:
+    elif vram_gb >= 11:
         cfg = {
             "max_matting_pixels": 1440 * 810,
             "ma2_internal_size": 360,
             "ma2_mem_frames": 2,
             "downsample_ratio": 0.125,
         }
-    elif vram_gb >= 8:
+    elif vram_gb >= 7:
         cfg = {
             "max_matting_pixels": 1280 * 720,
             "ma2_internal_size": 320,

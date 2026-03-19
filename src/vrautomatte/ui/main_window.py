@@ -53,6 +53,52 @@ from vrautomatte.utils.settings import load_settings, save_settings
 
 
 
+import re
+
+# DeoVR lens/projection tags → (is_fisheye, fov, canonical_tag)
+# Order matters: more specific patterns first.
+_DEOVR_LENS_TAGS = [
+    (r"_FISHEYE(\d+)", True, None),     # _FISHEYE190 → fov from match
+    (r"_FISHEYE\b", True, "_FISHEYE"),  # bare _FISHEYE → 180°
+    (r"_MKX200\b", True, "_MKX200"),    # Metalenz MKX 200°
+    (r"_MKX220\b", True, "_MKX220"),    # Metalenz MKX 220°
+    (r"_VRCA220\b", True, "_VRCA220"),  # VRCA 220°
+    (r"_RF52\b", True, "_RF52"),        # Canon RF 5.2mm dual fisheye
+]
+
+# Default FOVs for known lens profiles
+_LENS_FOV = {
+    "_FISHEYE": 180,
+    "_MKX200": 200,
+    "_MKX220": 220,
+    "_VRCA220": 220,
+    "_RF52": 190,
+}
+
+
+def _detect_lens_tag(filename: str) -> tuple[bool, int, str]:
+    """Detect DeoVR projection/lens tag from a filename.
+
+    Returns:
+        (is_fisheye, fov, tag)  where *tag* is the canonical
+        DeoVR tag to use in the output filename (e.g. "_MKX200").
+        If no tag is found: (False, 0, "").
+    """
+    stem = Path(filename).stem.upper()
+    for pattern, is_fish, canon in _DEOVR_LENS_TAGS:
+        m = re.search(pattern, stem, re.IGNORECASE)
+        if m:
+            if canon is None:
+                # _FISHEYE{N} — fov from capture group
+                fov = int(m.group(1)) if m.lastindex else 180
+                tag = f"_FISHEYE{fov}"
+            else:
+                fov = _LENS_FOV.get(canon, 190)
+                tag = canon
+            return (is_fish, fov, tag)
+    return (False, 0, "")
+
+
 def _check_matanyone2() -> bool:
     """Check if MatAnyone 2 + SAM2 dependencies are installed."""
     try:
@@ -191,10 +237,12 @@ class MainWindow(QMainWindow):
             "• resnet50 — Better edge quality, slightly "
             "slower (~30 fps at 1080p). "
             "Detects ALL people. Best for crowds.\n"
-            "• MatAnyone 2 — Sharpest edges, best "
-            "hair/transparency (~8 fps, ~6 GB VRAM). "
-            "Tracks ONE person from the first frame. "
-            "Use for single-subject close-ups only."
+            "• MatAnyone 2 (experimental) — Sharpest edges, "
+            "best hair/transparency (~8 fps, ~6 GB VRAM). "
+            "Tracks ONE person from the first frame.\n"
+            "⚠ Requires SAM2 mask — does NOT work with "
+            "fisheye or equirectangular VR content. "
+            "Use for standard flat video only."
         )
         row1.addWidget(model_label)
         self.model_combo = QComboBox()
@@ -202,9 +250,9 @@ class MainWindow(QMainWindow):
         self.model_combo.addItems([
             "mobilenetv3 — all people, fast",
             "resnet50 — all people, quality",
-            "MatAnyone 2 — single subject"
+            "MatAnyone 2 (experimental, non-VR)"
             if self._ma2_available
-            else "MatAnyone 2 — click to install",
+            else "MatAnyone 2 (experimental) — click to install",
         ])
         self.model_combo.setToolTip(model_label.toolTip())
         self.model_combo.currentIndexChanged.connect(
@@ -285,6 +333,25 @@ class MainWindow(QMainWindow):
         self.downsample_combo.setToolTip(ds_label.toolTip())
         self.downsample_combo.setCurrentIndex(1)
         row2.addWidget(self.downsample_combo)
+        row2.addSpacing(20)
+        smooth_label = QLabel("Temporal Smoothing:")
+        smooth_label.setToolTip(
+            "Reduces frame-to-frame alpha jitter using "
+            "exponential moving average (EMA).\n\n"
+            "• Off — No smoothing, raw matte output\n"
+            "• Light — Subtle stabilisation (weight 0.85)\n"
+            "• Medium — Moderate smoothing (weight 0.7)\n"
+            "• Heavy — Strong smoothing (weight 0.5)\n\n"
+            "Useful for RVM on VR content where edges "
+            "can flicker between frames."
+        )
+        row2.addWidget(smooth_label)
+        self.smooth_combo = QComboBox()
+        self.smooth_combo.addItems([
+            "Off", "Light", "Medium", "Heavy",
+        ])
+        self.smooth_combo.setToolTip(smooth_label.toolTip())
+        row2.addWidget(self.smooth_combo)
         row2.addStretch()
         settings_layout.addLayout(row2)
 
@@ -323,7 +390,7 @@ class MainWindow(QMainWindow):
         )
         vr_row.addWidget(fov_label_text)
         self.fov_slider = QSlider(Qt.Orientation.Horizontal)
-        self.fov_slider.setRange(170, 210)
+        self.fov_slider.setRange(170, 220)
         self.fov_slider.setValue(180)
         self.fov_slider.setToolTip(
             fov_label_text.toolTip()
@@ -463,6 +530,17 @@ class MainWindow(QMainWindow):
         root.addWidget(settings_group)
 
         # ── Preview ──
+        self.preview_check = QCheckBox("Preview")
+        self.preview_check.setChecked(True)
+        self.preview_check.setToolTip(
+            "Show live frame preview during processing.\n"
+            "Disable for a small speed boost."
+        )
+        self.preview_check.stateChanged.connect(
+            lambda s: self.preview.setVisible(bool(s))
+        )
+        settings_layout.addWidget(self.preview_check)
+
         self.preview = PreviewWidget()
         self.preview.frame_scrubbed.connect(
             self._on_frame_scrubbed
@@ -572,11 +650,17 @@ class MainWindow(QMainWindow):
         self.sbs_check.setChecked(s.get("is_sbs", False))
         self.pov_check.setChecked(s.get("pov_mode", False))
         self.temp_dir_edit.setText(s.get("temp_dir", ""))
+        self.smooth_combo.setCurrentIndex(
+            s.get("temporal_smoothing", 0)
+        )
         self.chunk_size_combo.setCurrentIndex(
             s.get("chunk_size", 2)
         )
         self.resume_check.setChecked(
             s.get("auto_resume", True)
+        )
+        self.preview_check.setChecked(
+            s.get("preview_enabled", True)
         )
         self.resize(
             s.get("window_width", 900),
@@ -597,8 +681,10 @@ class MainWindow(QMainWindow):
             "pov_mode": self.pov_check.isChecked(),
             "dark_theme": self._is_dark,
             "temp_dir": self.temp_dir_edit.text(),
+            "temporal_smoothing": self.smooth_combo.currentIndex(),
             "chunk_size": self.chunk_size_combo.currentIndex(),
             "auto_resume": self.resume_check.isChecked(),
+            "preview_enabled": self.preview_check.isChecked(),
             "window_width": self.width(),
             "window_height": self.height(),
         })
@@ -698,15 +784,24 @@ class MainWindow(QMainWindow):
     def _add_file_to_batch(self, input_path: str):
         """Add a file to the batch queue with auto output name.
 
+        Generates the correct output name based on the current
+        output format (matte-only vs DeoVR Alpha with tags).
+
         Args:
             input_path: Path to the video file.
         """
         p = Path(input_path)
-        stem = p.stem
-        suffix = p.suffix
-        output_path = str(
-            p.parent / f"{stem}_matte{suffix}"
-        )
+        if self.format_combo.currentIndex() == 1:
+            _fish, fov, _tag = _detect_lens_tag(input_path)
+            if not fov:
+                fov = self.fov_slider.value()
+            output_path = self._deovr_output_name(
+                input_path, fov
+            )
+        else:
+            output_path = str(
+                p.parent / f"{p.stem}_matte{p.suffix}"
+            )
 
         entry = {
             "input": input_path,
@@ -784,16 +879,50 @@ class MainWindow(QMainWindow):
         if path:
             self.temp_dir_edit.setText(path)
 
+    @staticmethod
+    def _deovr_output_name(
+        input_path: str, fov: int
+    ) -> str:
+        """Build DeoVR alpha output path.
+
+        Preserves the original lens tag (_MKX200, _VRCA220,
+        _FISHEYE190, etc.) if present, otherwise appends
+        _FISHEYE{fov}.  Always appends _alpha.
+        """
+        p = Path(input_path)
+        stem = p.stem
+
+        # Detect the source's lens tag
+        _fish, _fov, lens_tag = _detect_lens_tag(
+            input_path
+        )
+
+        # Strip existing DeoVR tags to avoid duplication
+        for tag in (
+            r"_FISHEYE\d*", r"_MKX\d*", r"_VRCA\d*",
+            r"_RF52", r"_alpha",
+        ):
+            stem = re.sub(tag, "", stem, flags=re.IGNORECASE)
+
+        # Use original lens tag if detected, else _FISHEYE{fov}
+        proj_tag = lens_tag or f"_FISHEYE{fov}"
+        return str(
+            p.parent
+            / f"{stem}{proj_tag}_alpha{p.suffix}"
+        )
+
     def _auto_output_name(self, input_path: str):
         """Generate a default output filename based on input."""
         p = Path(input_path)
         fmt = self.format_combo.currentIndex()
         if fmt == 1:  # DeoVR Alpha
-            suffix = f"_ALPHA{p.suffix}"
+            fov = self.fov_slider.value()
+            output = self._deovr_output_name(input_path, fov)
         else:
-            suffix = f"_matte{p.suffix}"
-        output = p.parent / f"{p.stem}{suffix}"
-        self.output_edit.setText(str(output))
+            output = str(
+                p.parent / f"{p.stem}_matte{p.suffix}"
+            )
+        self.output_edit.setText(output)
 
     def _show_video_info(self, path: str):
         """Display video metadata and auto-detect SBS."""
@@ -818,6 +947,16 @@ class MainWindow(QMainWindow):
                 )
             else:
                 self.sbs_auto_label.setText("")
+
+            # Auto-detect projection from DeoVR lens tags
+            is_fish, fov, _tag = _detect_lens_tag(path)
+            if is_fish:
+                self.projection_combo.setCurrentIndex(1)
+                self.fov_slider.setValue(
+                    max(170, min(220, fov))
+                )
+            else:
+                self.projection_combo.setCurrentIndex(0)
 
             # Enable scrubber for seek
             self.preview.set_scrubber_enabled(
@@ -1006,6 +1145,7 @@ class MainWindow(QMainWindow):
             2: "matanyone2",
         }
 
+        smooth_map = {0: 1.0, 1: 0.85, 2: 0.7, 3: 0.5}
         chunk_map = {0: 100, 1: 250, 2: 500, 3: 1000}
 
         config = PipelineConfig(
@@ -1020,6 +1160,9 @@ class MainWindow(QMainWindow):
             crf=self.crf_slider.value(),
             is_sbs=self.sbs_check.isChecked(),
             pov_mode=self.pov_check.isChecked(),
+            temporal_smoothing=smooth_map.get(
+                self.smooth_combo.currentIndex(), 1.0
+            ),
             temp_dir=self.temp_dir_edit.text(),
             chunk_size=chunk_map.get(
                 self.chunk_size_combo.currentIndex(), 500
@@ -1048,12 +1191,23 @@ class MainWindow(QMainWindow):
                 if self.codec_combo.currentIndex() == 0
                 else "libx264"
             )
-            config.projection = (
-                ProjectionType.EQUIRECTANGULAR
-                if self.projection_combo.currentIndex() == 0
-                else ProjectionType.FISHEYE
+
+            # Per-file projection detection from filename,
+            # falling back to the UI widget setting.
+            is_fish, fov, _tag = _detect_lens_tag(
+                config.input_path
             )
-            config.fisheye_fov = self.fov_slider.value()
+            if is_fish:
+                config.projection = ProjectionType.FISHEYE
+                config.fisheye_fov = fov
+            else:
+                config.projection = (
+                    ProjectionType.EQUIRECTANGULAR
+                    if self.projection_combo.currentIndex()
+                    == 0
+                    else ProjectionType.FISHEYE
+                )
+                config.fisheye_fov = self.fov_slider.value()
 
             # Auto-resolve mask path
             mask = get_mask_path()
@@ -1264,7 +1418,7 @@ class MainWindow(QMainWindow):
                 status.setText("✅ Installation complete!")
                 self._ma2_available = True
                 self.model_combo.setItemText(
-                    2, "MatAnyone 2 — single subject"
+                    2, "MatAnyone 2 (experimental, non-VR)"
                 )
                 self.model_combo.setCurrentIndex(2)
             else:
@@ -1310,15 +1464,16 @@ class MainWindow(QMainWindow):
                 f"~{p.estimated_disk_gb:.1f} GB estimated"
             )
 
-        self.preview.update_preview(
-            source_frame=p.source_frame,
-            matte_frame=p.matte_frame,
-            frame_num=p.frame_num,
-            total_frames=p.total_frames,
-            eta_sec=p.eta_sec,
-            fps=p.fps,
-            elapsed_sec=p.elapsed_sec,
-        )
+        if self.preview_check.isChecked():
+            self.preview.update_preview(
+                source_frame=p.source_frame,
+                matte_frame=p.matte_frame,
+                frame_num=p.frame_num,
+                total_frames=p.total_frames,
+                eta_sec=p.eta_sec,
+                fps=p.fps,
+                elapsed_sec=p.elapsed_sec,
+            )
 
     def _on_finished(self, output_path: str):
         """Handle single-file completion."""
@@ -1358,6 +1513,7 @@ class MainWindow(QMainWindow):
         self.format_combo.setEnabled(False)
         self.crf_slider.setEnabled(False)
         self.downsample_combo.setEnabled(False)
+        self.smooth_combo.setEnabled(False)
         self.chunk_size_combo.setEnabled(False)
         self.resume_check.setEnabled(False)
 
@@ -1372,5 +1528,6 @@ class MainWindow(QMainWindow):
         self.format_combo.setEnabled(True)
         self.crf_slider.setEnabled(True)
         self.downsample_combo.setEnabled(True)
+        self.smooth_combo.setEnabled(True)
         self.chunk_size_combo.setEnabled(True)
         self.resume_check.setEnabled(True)
