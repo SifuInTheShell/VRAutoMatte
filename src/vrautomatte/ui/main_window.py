@@ -537,7 +537,7 @@ class MainWindow(QMainWindow):
             "Disable for a small speed boost."
         )
         self.preview_check.stateChanged.connect(
-            lambda s: self.preview.setVisible(bool(s))
+            self._toggle_preview_images
         )
         settings_layout.addWidget(self.preview_check)
 
@@ -1024,6 +1024,12 @@ class MainWindow(QMainWindow):
         except Exception as e:
             logger.debug(f"Scrubber seek failed: {e}")
 
+    def _toggle_preview_images(self, state: int):
+        """Show/hide preview images while keeping progress visible."""
+        show = bool(state)
+        self.preview.source_label.setVisible(show)
+        self.preview.matte_label.setVisible(show)
+
     def _update_crf_label(self, value: int):
         self.crf_label.setText(str(value))
 
@@ -1464,16 +1470,20 @@ class MainWindow(QMainWindow):
                 f"~{p.estimated_disk_gb:.1f} GB estimated"
             )
 
-        if self.preview_check.isChecked():
-            self.preview.update_preview(
-                source_frame=p.source_frame,
-                matte_frame=p.matte_frame,
-                frame_num=p.frame_num,
-                total_frames=p.total_frames,
-                eta_sec=p.eta_sec,
-                fps=p.fps,
-                elapsed_sec=p.elapsed_sec,
-            )
+        show_frames = self.preview_check.isChecked()
+        self.preview.update_preview(
+            source_frame=(
+                p.source_frame if show_frames else None
+            ),
+            matte_frame=(
+                p.matte_frame if show_frames else None
+            ),
+            frame_num=p.frame_num,
+            total_frames=p.total_frames,
+            eta_sec=p.eta_sec,
+            fps=p.fps,
+            elapsed_sec=p.elapsed_sec,
+        )
 
     def _on_finished(self, output_path: str):
         """Handle single-file completion."""
