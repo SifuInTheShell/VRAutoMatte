@@ -551,9 +551,8 @@ class MainWindow(QMainWindow):
         self.preview.frame_scrubbed.connect(
             self._on_frame_scrubbed
         )
-        root.addWidget(self.preview, stretch=1)
 
-        # ── Batch Queue (collapsible) ──
+        # ── Batch Queue ──
         self.batch_group = QGroupBox(
             "Batch Queue (0 files)"
         )
@@ -576,7 +575,16 @@ class MainWindow(QMainWindow):
         batch_btn_row.addStretch()
         batch_layout.addLayout(batch_btn_row)
         self.batch_group.setVisible(False)
-        root.addWidget(self.batch_group, stretch=1)
+
+        # Splitter lets the user drag-resize preview vs batch
+        self._content_splitter = QSplitter(
+            Qt.Orientation.Vertical
+        )
+        self._content_splitter.addWidget(self.preview)
+        self._content_splitter.addWidget(self.batch_group)
+        self._content_splitter.setStretchFactor(0, 3)
+        self._content_splitter.setStretchFactor(1, 1)
+        root.addWidget(self._content_splitter, stretch=1)
 
         # ── Action bar ──
         action_layout = QHBoxLayout()
