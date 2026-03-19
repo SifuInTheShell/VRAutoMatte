@@ -414,6 +414,16 @@ class Pipeline:
             config, input_path, cfg_hash
         )
 
+        # Write log to temp directory
+        log_path = tmp / "vrautomatte.log"
+        log_id = logger.add(
+            str(log_path), level="DEBUG",
+            format=(
+                "{time:YYYY-MM-DD HH:mm:ss} | "
+                "{level: <8} | {message}"
+            ),
+        )
+
         completed = False
         try:
             frames_dir = tmp / "frames"
@@ -672,6 +682,15 @@ class Pipeline:
             return output_path
 
         finally:
+            logger.remove(log_id)
+            # Copy log next to output before cleanup
+            if completed and log_path.exists():
+                dest_log = output_path.with_suffix(".log")
+                try:
+                    shutil.copy2(log_path, dest_log)
+                    logger.info(f"Log saved to {dest_log}")
+                except OSError:
+                    pass
             # Completed or non-resume: clean temp dir.
             # Incomplete + resume: leave dir for resume.
             if completed or not is_deterministic:
