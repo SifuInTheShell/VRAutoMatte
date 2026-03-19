@@ -559,11 +559,11 @@ class MainWindow(QMainWindow):
         )
         batch_layout = QVBoxLayout(self.batch_group)
         self.batch_list = QListWidget()
-        self.batch_list.setMaximumHeight(100)
+        self.batch_list.setMinimumHeight(60)
         self.batch_list.setSelectionMode(
             QAbstractItemView.SelectionMode.ExtendedSelection
         )
-        batch_layout.addWidget(self.batch_list)
+        batch_layout.addWidget(self.batch_list, stretch=1)
         batch_btn_row = QHBoxLayout()
         self.batch_remove_btn = QPushButton("Remove Selected")
         self.batch_remove_btn.clicked.connect(
