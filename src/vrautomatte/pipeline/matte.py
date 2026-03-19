@@ -48,6 +48,51 @@ class MatteProcessor(Protocol):
         ...
 
 
+class AlphaSmoother:
+    """EMA temporal smoothing wrapper for any MatteProcessor.
+
+    Blends consecutive alpha frames to reduce frame-to-frame jitter.
+    alpha_out = weight * current + (1 - weight) * previous
+
+    Args:
+        inner: The actual MatteProcessor to wrap.
+        weight: Blend weight for the current frame (0..1).
+            1.0 = no smoothing (pass-through), lower = smoother.
+    """
+
+    def __init__(
+        self,
+        inner: MatteProcessor,
+        weight: float = 0.85,
+    ):
+        self._inner = inner
+        self._weight = weight
+        self._prev: np.ndarray | None = None
+
+    def process_frame(self, frame: np.ndarray) -> np.ndarray:
+        """Process frame and blend with previous matte."""
+        matte = self._inner.process_frame(frame)
+        if self._prev is not None:
+            blended = (
+                self._weight * matte.astype(np.float32)
+                + (1.0 - self._weight)
+                * self._prev.astype(np.float32)
+            )
+            matte = blended.clip(0, 255).astype(np.uint8)
+        self._prev = matte.copy()
+        return matte
+
+    def reset(self) -> None:
+        """Reset inner processor and smoothing state."""
+        self._inner.reset()
+        self._prev = None
+
+    def cleanup(self) -> None:
+        """Release inner processor resources."""
+        self._inner.cleanup()
+        self._prev = None
+
+
 class POVExclusionProcessor:
     """Wrapper that subtracts a POV body mask from RVM output.
 
