@@ -139,14 +139,19 @@ class MainWindow(QMainWindow):
         self.setAcceptDrops(True)
 
     def _setup_ui(self):
+        central = QWidget()
+        self.setCentralWidget(central)
+        outer = QVBoxLayout(central)
+        outer.setSpacing(6)
+        outer.setContentsMargins(0, 0, 0, 0)
+
+        # ── Scrollable top section (file I/O + settings) ──
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
-        self.setCentralWidget(scroll)
-
-        central = QWidget()
-        scroll.setWidget(central)
-        root = QVBoxLayout(central)
+        scroll_content = QWidget()
+        scroll.setWidget(scroll_content)
+        root = QVBoxLayout(scroll_content)
         root.setSpacing(10)
         root.setContentsMargins(18, 18, 18, 18)
 
@@ -535,7 +540,7 @@ class MainWindow(QMainWindow):
 
         root.addWidget(settings_group)
 
-        # ── Preview ──
+        # ── Preview toggle (inside scroll with settings) ──
         self.preview_check = QCheckBox("Preview")
         self.preview_check.setChecked(True)
         self.preview_check.setToolTip(
@@ -547,12 +552,15 @@ class MainWindow(QMainWindow):
         )
         settings_layout.addWidget(self.preview_check)
 
+        # End of scrollable section — add to outer layout
+        outer.addWidget(scroll)
+
+        # ── Preview + Batch (outside scroll, in a splitter) ──
         self.preview = PreviewWidget()
         self.preview.frame_scrubbed.connect(
             self._on_frame_scrubbed
         )
 
-        # ── Batch Queue ──
         self.batch_group = QGroupBox(
             "Batch Queue (0 files)"
         )
@@ -576,7 +584,6 @@ class MainWindow(QMainWindow):
         batch_layout.addLayout(batch_btn_row)
         self.batch_group.setVisible(False)
 
-        # Splitter lets the user drag-resize preview vs batch
         self._content_splitter = QSplitter(
             Qt.Orientation.Vertical
         )
@@ -584,7 +591,10 @@ class MainWindow(QMainWindow):
         self._content_splitter.addWidget(self.batch_group)
         self._content_splitter.setStretchFactor(0, 3)
         self._content_splitter.setStretchFactor(1, 1)
-        root.addWidget(self._content_splitter, stretch=1)
+        self._content_splitter.setChildrenCollapsible(False)
+        outer.addWidget(
+            self._content_splitter, stretch=1
+        )
 
         # ── Action bar ──
         action_layout = QHBoxLayout()
@@ -607,17 +617,40 @@ class MainWindow(QMainWindow):
         self.progress_bar.setValue(0)
         action_layout.addWidget(self.progress_bar, stretch=1)
 
-        root.addLayout(action_layout)
+        # ── Action bar (outside scroll) ──
+        action_bar = QWidget()
+        action_bar.setContentsMargins(18, 0, 18, 0)
+        ab_layout = QVBoxLayout(action_bar)
+        ab_layout.setSpacing(4)
+        ab_layout.setContentsMargins(0, 0, 0, 8)
 
-        # Disk usage estimate
+        action_layout = QHBoxLayout()
+        self.start_btn = QPushButton("▶  Start Processing")
+        self.start_btn.setObjectName("startButton")
+        self.start_btn.clicked.connect(self._start_processing)
+        action_layout.addWidget(self.start_btn)
+
+        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.setObjectName("cancelButton")
+        self.cancel_btn.setVisible(False)
+        self.cancel_btn.clicked.connect(self._cancel_processing)
+        action_layout.addWidget(self.cancel_btn)
+
+        action_layout.addSpacing(16)
+
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        action_layout.addWidget(self.progress_bar, stretch=1)
+        ab_layout.addLayout(action_layout)
+
         self.disk_label = QLabel("")
         self.disk_label.setObjectName("diskLabel")
         self.disk_label.setStyleSheet(
             "font-size: 10px; font-style: italic;"
         )
-        root.addWidget(self.disk_label)
+        ab_layout.addWidget(self.disk_label)
 
-        # Status bar
         status_row = QHBoxLayout()
         self.status_label = QLabel("Ready")
         self.status_label.setObjectName("statusLabel")
@@ -632,7 +665,9 @@ class MainWindow(QMainWindow):
         self.theme_btn.setToolTip("Toggle light / dark theme")
         self.theme_btn.clicked.connect(self._toggle_theme)
         status_row.addWidget(self.theme_btn)
-        root.addLayout(status_row)
+        ab_layout.addLayout(status_row)
+
+        outer.addWidget(action_bar)
 
         # Convert all plain-text tooltips to rich text so Qt
         # enables automatic word-wrapping instead of clipping.
