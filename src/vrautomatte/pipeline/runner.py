@@ -430,21 +430,46 @@ class Pipeline:
                 if ckpt and ckpt.validate(
                     input_path, cfg_hash
                 ):
-                    resume_seg = ckpt.completed_segments
-                    resume_frames = ckpt.completed_frames
-                    logger.info(
-                        f"Resuming from segment {resume_seg} "
-                        f"({resume_frames:,} frames done)"
+                    # Verify that all prior segment files exist
+                    all_present = all(
+                        (segments_dir
+                         / f"segment_{i:06d}.mp4").exists()
+                        for i in range(ckpt.completed_segments)
                     )
-                    self._emit(PipelineProgress(
-                        stage=(
+                    if all_present:
+                        resume_seg = ckpt.completed_segments
+                        resume_frames = ckpt.completed_frames
+                        logger.info(
                             f"Resuming from segment "
                             f"{resume_seg} "
                             f"({resume_frames:,} frames done)"
-                        ),
-                        stage_num=2,
-                        total_stages=self._total_stages(),
-                    ))
+                        )
+                        self._emit(PipelineProgress(
+                            stage=(
+                                f"Resuming from segment "
+                                f"{resume_seg} "
+                                f"({resume_frames:,} frames "
+                                f"done)"
+                            ),
+                            stage_num=2,
+                            total_stages=self._total_stages(),
+                        ))
+                    else:
+                        logger.warning(
+                            "Checkpoint found but segment "
+                            "files are missing — restarting"
+                        )
+                        PipelineCheckpoint.delete(tmp)
+
+            # Clean leftover PNGs from a partial chunk
+            # (cancelled mid-chunk before flush).
+            if resume_frames > 0:
+                for d in (frames_dir, mattes_dir):
+                    for png in d.glob("*.png"):
+                        try:
+                            png.unlink()
+                        except OSError:
+                            pass
 
             # Pre-flight disk check
             estimated = self._estimate_disk_bytes(
