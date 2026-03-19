@@ -576,7 +576,7 @@ class MainWindow(QMainWindow):
         batch_btn_row.addStretch()
         batch_layout.addLayout(batch_btn_row)
         self.batch_group.setVisible(False)
-        root.addWidget(self.batch_group)
+        root.addWidget(self.batch_group, stretch=1)
 
         # ── Action bar ──
         action_layout = QHBoxLayout()
