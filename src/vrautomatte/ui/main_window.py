@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QScrollArea,
     QSlider,
     QSplitter,
     QVBoxLayout,
@@ -138,8 +139,13 @@ class MainWindow(QMainWindow):
         self.setAcceptDrops(True)
 
     def _setup_ui(self):
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        self.setCentralWidget(scroll)
+
         central = QWidget()
-        self.setCentralWidget(central)
+        scroll.setWidget(central)
         root = QVBoxLayout(central)
         root.setSpacing(10)
         root.setContentsMargins(18, 18, 18, 18)
