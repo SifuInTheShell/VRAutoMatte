@@ -3123,6 +3123,10 @@ dependencies = [
     { name = "loguru" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.4.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "onnxruntime", version = "1.24.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' and sys_platform != 'win32'" },
+    { name = "onnxruntime", version = "1.24.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11' and sys_platform != 'win32'" },
+    { name = "onnxruntime-directml", version = "1.24.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' and sys_platform == 'win32'" },
+    { name = "onnxruntime-directml", version = "1.24.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11' and sys_platform == 'win32'" },
     { name = "pillow" },
     { name = "pyside6" },
     { name = "torch", version = "2.10.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'darwin'" },
@@ -3136,20 +3140,14 @@ matanyone2 = [
     { name = "matanyone2" },
     { name = "sam2" },
 ]
-onnx = [
-    { name = "onnxruntime", version = "1.24.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' and sys_platform != 'win32'" },
-    { name = "onnxruntime", version = "1.24.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11' and sys_platform != 'win32'" },
-    { name = "onnxruntime-directml", version = "1.24.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' and sys_platform == 'win32'" },
-    { name = "onnxruntime-directml", version = "1.24.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11' and sys_platform == 'win32'" },
-]
 
 [package.metadata]
 requires-dist = [
     { name = "loguru", specifier = ">=0.7" },
     { name = "matanyone2", marker = "extra == 'matanyone2'", git = "https://github.com/pq-yang/MatAnyone2.git" },
     { name = "numpy", specifier = ">=1.24" },
-    { name = "onnxruntime", marker = "sys_platform != 'win32' and extra == 'onnx'", specifier = ">=1.18" },
-    { name = "onnxruntime-directml", marker = "sys_platform == 'win32' and extra == 'onnx'", specifier = ">=1.18" },
+    { name = "onnxruntime", marker = "sys_platform != 'win32'", specifier = ">=1.18" },
+    { name = "onnxruntime-directml", marker = "sys_platform == 'win32'", specifier = ">=1.18" },
     { name = "pillow", specifier = ">=10.0" },
     { name = "pyside6", specifier = ">=6.6" },
     { name = "sam2", marker = "extra == 'matanyone2'", specifier = ">=1.0" },
@@ -3158,7 +3156,7 @@ requires-dist = [
     { name = "torchvision", marker = "sys_platform != 'darwin'", specifier = ">=0.15", index = "https://download.pytorch.org/whl/cu128" },
     { name = "torchvision", marker = "sys_platform == 'darwin'", specifier = ">=0.15" },
 ]
-provides-extras = ["onnx", "matanyone2"]
+provides-extras = ["matanyone2"]
 
 [[package]]
 name = "werkzeug"
