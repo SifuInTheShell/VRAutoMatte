@@ -18,6 +18,10 @@ dependencies = [
 vrautomatte = "vrautomatte.main:main"
 
 [project.optional-dependencies]
+onnx = [
+    "onnxruntime-directml>=1.18; sys_platform == 'win32'",
+    "onnxruntime>=1.18; sys_platform != 'win32'",
+]
 matanyone2 = [
     "matanyone2 @ git+https://github.com/pq-yang/MatAnyone2.git",
     "sam2>=1.0",

@@ -21,7 +21,11 @@ from loguru import logger
 from vrautomatte.utils.gpu import get_device
 
 # Valid model variant names
-VARIANTS = ["mobilenetv3", "resnet50", "matanyone2"]
+VARIANTS = [
+    "mobilenetv3", "resnet50",
+    "mobilenetv3_onnx", "resnet50_onnx",
+    "matanyone2",
+]
 
 
 @runtime_checkable
@@ -213,6 +217,41 @@ def create_processor(
     Returns:
         A MatteProcessor instance.
     """
+    # ── ONNX Runtime variants (DirectML / CUDA EP / CPU) ──
+    if variant in ("mobilenetv3_onnx", "resnet50_onnx"):
+        from vrautomatte.pipeline.rvm_onnx import (
+            RVMOnnxProcessor,
+        )
+        base_variant = variant.replace("_onnx", "")
+        processor = RVMOnnxProcessor(
+            variant=base_variant,
+            downsample_ratio=downsample_ratio,
+        )
+
+        if pov_mode and first_frame is not None:
+            from vrautomatte.pipeline.sam2_masks import (
+                generate_pov_body_mask,
+            )
+            if device is None:
+                device = get_device()
+            logger.info(
+                "RVM ONNX + POV: generating exclusion mask..."
+            )
+            body_mask = generate_pov_body_mask(
+                first_frame, device
+            )
+            return POVExclusionProcessor(
+                processor, body_mask, device=device
+            )
+        elif pov_mode:
+            logger.warning(
+                "POV mode requires first_frame for RVM — "
+                "falling back to standard matting"
+            )
+
+        return processor
+
+    # ── PyTorch TorchScript variants ───────────────────────
     if variant in ("mobilenetv3", "resnet50"):
         from vrautomatte.pipeline.rvm import RVMProcessor
         processor = RVMProcessor(
