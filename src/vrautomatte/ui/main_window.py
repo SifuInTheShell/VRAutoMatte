@@ -100,6 +100,15 @@ def _detect_lens_tag(filename: str) -> tuple[bool, int, str]:
     return (False, 0, "")
 
 
+def _check_onnxruntime() -> bool:
+    """Check if ONNX Runtime is installed."""
+    try:
+        import onnxruntime  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
 def _check_matanyone2() -> bool:
     """Check if MatAnyone 2 + SAM2 dependencies are installed."""
     try:
@@ -137,6 +146,11 @@ class MainWindow(QMainWindow):
         self._update_device_label()
         self._apply_theme()
         self.setAcceptDrops(True)
+
+    @property
+    def _ma2_index(self) -> int:
+        """Index of the MatAnyone 2 entry in the model combo."""
+        return 4 if self._onnx_available else 2
 
     def _setup_ui(self):
         central = QWidget()
@@ -248,6 +262,10 @@ class MainWindow(QMainWindow):
             "• resnet50 — Better edge quality, slightly "
             "slower (~30 fps at 1080p). "
             "Detects ALL people. Best for crowds.\n"
+            "• ONNX variants — Same RVM models via ONNX "
+            "Runtime + DirectML. Works on any GPU vendor "
+            "(NVIDIA, AMD, Intel) without CUDA. "
+            "Install onnxruntime-directml to enable.\n"
             "• MatAnyone 2 (experimental) — Sharpest edges, "
             "best hair/transparency (~8 fps, ~6 GB VRAM). "
             "Tracks ONE person from the first frame.\n"
@@ -258,9 +276,13 @@ class MainWindow(QMainWindow):
         row1.addWidget(model_label)
         self.model_combo = QComboBox()
         self._ma2_available = _check_matanyone2()
+        self._onnx_available = _check_onnxruntime()
         self.model_combo.addItems([
             "mobilenetv3 — all people, fast",
             "resnet50 — all people, quality",
+            *(["mobilenetv3 ONNX — DirectML, any GPU",
+               "resnet50 ONNX — DirectML, any GPU"]
+              if self._onnx_available else []),
             "MatAnyone 2 (experimental, non-VR)"
             if self._ma2_available
             else "MatAnyone 2 (experimental) — click to install",
@@ -1132,7 +1154,7 @@ class MainWindow(QMainWindow):
         If MatAnyone 2 is selected but not installed,
         trigger the install flow and revert to previous model.
         """
-        if index == 2 and not self._ma2_available:
+        if index == self._ma2_index and not self._ma2_available:
             # Revert to previous selection before install
             self.model_combo.blockSignals(True)
             self.model_combo.setCurrentIndex(0)
@@ -1146,7 +1168,7 @@ class MainWindow(QMainWindow):
         c = self._colors
         if not self.pov_check.isChecked():
             self.pov_warning.setText("")
-        elif self.model_combo.currentIndex() == 2:
+        elif self.model_combo.currentIndex() == self._ma2_index:
             self.pov_warning.setText(
                 "✓ Best quality (instance matting)"
             )
@@ -1194,11 +1216,20 @@ class MainWindow(QMainWindow):
             output_path: Override output (for batch mode).
         """
         ds_map = {0: 0.125, 1: 0.25, 2: 0.5, 3: 1.0}
-        model_map = {
-            0: "mobilenetv3",
-            1: "resnet50",
-            2: "matanyone2",
-        }
+        if self._onnx_available:
+            model_map = {
+                0: "mobilenetv3",
+                1: "resnet50",
+                2: "mobilenetv3_onnx",
+                3: "resnet50_onnx",
+                4: "matanyone2",
+            }
+        else:
+            model_map = {
+                0: "mobilenetv3",
+                1: "resnet50",
+                2: "matanyone2",
+            }
 
         smooth_map = {0: 1.0, 1: 0.85, 2: 0.7, 3: 0.5}
         chunk_map = {0: 100, 1: 250, 2: 500, 3: 1000}
@@ -1298,7 +1329,7 @@ class MainWindow(QMainWindow):
 
         # Check sam2 availability for features that need it
         needs_sam2 = (
-            self.model_combo.currentIndex() == 2
+            self.model_combo.currentIndex() == self._ma2_index
             or self.pov_check.isChecked()
         )
         if needs_sam2 and not self._ma2_available:
@@ -1414,7 +1445,7 @@ class MainWindow(QMainWindow):
         """Ask user to install MatAnyone 2 deps, then install."""
         feature = (
             "MatAnyone 2"
-            if self.model_combo.currentIndex() == 2
+            if self.model_combo.currentIndex() == self._ma2_index
             else "POV mode"
         )
         reply = QMessageBox.question(
@@ -1473,9 +1504,12 @@ class MainWindow(QMainWindow):
                 status.setText("✅ Installation complete!")
                 self._ma2_available = True
                 self.model_combo.setItemText(
-                    2, "MatAnyone 2 (experimental, non-VR)"
+                    self._ma2_index,
+                    "MatAnyone 2 (experimental, non-VR)",
                 )
-                self.model_combo.setCurrentIndex(2)
+                self.model_combo.setCurrentIndex(
+                    self._ma2_index
+                )
             else:
                 status.setText("❌ Installation failed")
 
