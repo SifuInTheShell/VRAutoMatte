@@ -239,11 +239,10 @@ class MatAnyone2Processor:
         img_tensor = self._to_tensor(frame)
 
         with torch.no_grad(), self._autocast():
-            mask_tensor = (
-                torch.from_numpy(self._mask)
-                .float()
-                .to(self.device)
-            )
+            mask_tensor = torch.from_numpy(self._mask).float()
+            if self._use_fp16:
+                mask_tensor = mask_tensor.half()
+            mask_tensor = mask_tensor.to(self.device)
             self._processor.step(
                 img_tensor,
                 mask_tensor,

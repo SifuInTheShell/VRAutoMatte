@@ -12,16 +12,14 @@ dependencies = [
     "numpy>=1.24",
     "Pillow>=10.0",
     "loguru>=0.7",
+    "onnxruntime-directml>=1.18; sys_platform == 'win32'",
+    "onnxruntime>=1.18; sys_platform != 'win32'",
 ]
 
 [project.scripts]
 vrautomatte = "vrautomatte.main:main"
 
 [project.optional-dependencies]
-onnx = [
-    "onnxruntime-directml>=1.18; sys_platform == 'win32'",
-    "onnxruntime>=1.18; sys_platform != 'win32'",
-]
 matanyone2 = [
     "matanyone2 @ git+https://github.com/pq-yang/MatAnyone2.git",
     "sam2>=1.0",
