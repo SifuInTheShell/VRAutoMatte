@@ -219,15 +219,20 @@ These trade (imperceptible) quality for speed and can be UI toggles:
 
 ## 5. Suggested implementation order
 
-| Step | Change | Effort | Expected end-to-end gain |
-|------|--------|--------|--------------------------|
-| 1 | 2.1 extract at target resolution (`-vf scale`) | ~10 lines | 2–3x |
-| 2 | 2.2 matte saved at model res, upscale in segment encode | ~10 lines | 1.3–1.6x |
-| 3 | 2.3 chunk prefetch thread | ~40 lines | 1.2–1.5x |
-| 4 | 3.4 drop per-chunk `empty_cache`; 3.3 compile default-on | ~5 lines | 1.1–1.3x |
-| 5 | 2.4 rawvideo pipe pipeline (replaces 1–3) | ~200 lines | GPU-bound |
-| 6 | 3.1 batched/streamed eyes, 3.2 pinned transfers | moderate | 1.3–2x |
-| 7 | Tier 3 toggles (half-rate matting, res selector) | small | up to 2x |
+| Step | Change | Effort | Expected end-to-end gain | Status |
+|------|--------|--------|--------------------------|--------|
+| 1 | 2.1 extract at target resolution (`-vf scale`) | ~10 lines | 2–3x | ✅ done (2026-07-07) |
+| 2 | 2.2 matte saved at model res, upscale in segment encode | ~10 lines | 1.3–1.6x | ✅ done (2026-07-07) |
+| 3 | 2.3 chunk prefetch thread | ~40 lines | 1.2–1.5x | ✅ done (2026-07-07) |
+| 4 | 3.4 drop per-chunk `empty_cache`; alloc-conf in bootstrap | ~5 lines | 1.1–1.3x | ✅ done (2026-07-07) |
+| 5 | 2.4 rawvideo pipe pipeline (replaces 1–3) | ~200 lines | GPU-bound | open |
+| 6 | 3.1 batched/streamed eyes, 3.2 pinned transfers | moderate | 1.3–2x | open |
+| 7 | Tier 3 toggles (half-rate matting, res selector) | small | up to 2x | open |
+
+Note: 3.3 (torch.compile default-on) was deliberately NOT flipped — the
+existing try/except only catches wrap-time errors, but Triton failures on
+Windows typically surface at the first forward pass, which would crash the
+pipeline mid-run. It stays opt-in until guarded by a warmup-frame test.
 
 Steps 1–4 are low-risk, independent, and should take the pipeline from ~1 FPS
 to roughly **4–6 FPS** on the RTX 5080. Step 5 makes the pipeline GPU-bound

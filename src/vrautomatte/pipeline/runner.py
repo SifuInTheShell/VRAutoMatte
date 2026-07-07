@@ -7,13 +7,13 @@ Steps:
 5. (Optional) Pack alpha channel for DeoVR format
 """
 
-import gc
 import math
 import os
 import shutil
 import subprocess
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -43,7 +43,6 @@ from vrautomatte.utils.ffmpeg import (
 from vrautomatte.utils.gpu import auto_configure_gpu
 from vrautomatte.utils.sbs import (
     detect_sbs,
-    merge_frames,
     merge_mattes,
     split_frame,
 )
@@ -174,6 +173,8 @@ class Pipeline:
     def _extract_chunk(
         self, input_path: Path, frames_dir: Path,
         timestamp: float, num_frames: int,
+        scale_to: tuple[int, int] | None = None,
+        quiet: bool = False,
     ) -> list[Path]:
         """Extract frames using fast keyframe seek.
 
@@ -181,6 +182,13 @@ class Pipeline:
         ~1-2 frame imprecision at chunk boundaries is acceptable
         for VR content.  Polls the output directory so the UI
         stays responsive and shows extraction progress.
+
+        When ``scale_to`` is set, ffmpeg downscales frames to the
+        matting resolution during extraction — its multithreaded
+        scaler replaces the per-frame PIL LANCZOS resize, and the
+        PNGs shrink proportionally (faster encode/decode + less
+        disk).  ``quiet`` suppresses progress emission for
+        background prefetch extractions.
         """
         for f in frames_dir.glob("frame_*.png"):
             try:
@@ -195,8 +203,11 @@ class Pipeline:
             "-ss", f"{timestamp:.6f}",
             "-i", str(input_path),
             "-frames:v", str(num_frames),
-            str(frames_dir / "frame_%06d.png"),
         ]
+        if scale_to is not None:
+            w, h = scale_to
+            cmd += ["-vf", f"scale={w}:{h}:flags=lanczos"]
+        cmd.append(str(frames_dir / "frame_%06d.png"))
 
         process = subprocess.Popen(
             cmd,
@@ -215,6 +226,8 @@ class Pipeline:
                     "Pipeline cancelled"
                 )
             time.sleep(0.5)
+            if quiet:
+                continue
             try:
                 count = len(os.listdir(frames_dir))
             except OSError:
@@ -474,12 +487,37 @@ class Pipeline:
             # Clean leftover PNGs from a partial chunk
             # (cancelled mid-chunk before flush).
             if resume_frames > 0:
-                for d in (frames_dir, mattes_dir):
+                prefetch_dir = tmp / "frames_prefetch"
+                for d in (frames_dir, mattes_dir, prefetch_dir):
                     for png in d.glob("*.png"):
                         try:
                             png.unlink()
                         except OSError:
                             pass
+
+            # Create scaler (per-eye dims for SBS) — determines
+            # the extraction resolution and the disk estimate.
+            use_sbs = config.is_sbs and detect_sbs(
+                info["width"], info["height"]
+            )
+            if use_sbs:
+                eye_w = info["width"] // 2
+                scaler = FrameScaler(
+                    config.max_matting_pixels,
+                    (eye_w, info["height"]),
+                )
+            else:
+                scaler = FrameScaler(
+                    config.max_matting_pixels,
+                    (info["width"], info["height"]),
+                )
+            if scaler.active:
+                tw, th = scaler.target_size
+                extract_w = tw * 2 if use_sbs else tw
+                extract_h = th
+            else:
+                extract_w = info["width"]
+                extract_h = info["height"]
 
             # Pre-flight disk check
             estimated = self._estimate_disk_bytes(
@@ -492,6 +530,8 @@ class Pipeline:
                     == OutputFormat.DEOVR_ALPHA
                 ),
                 chunk_size=config.chunk_size,
+                extract_w=extract_w,
+                extract_h=extract_h,
             )
             self._check_disk_space(tmp, estimated)
             est_gb = estimated / (1024 ** 3)
@@ -508,6 +548,8 @@ class Pipeline:
                 frames_dir, mattes_dir, segments_dir,
                 num_to_process, total_stages,
                 fps_str=info["fps_str"],
+                use_sbs=use_sbs,
+                scaler=scaler,
                 resume_seg=resume_seg,
                 resume_frames=resume_frames,
                 cfg_hash=cfg_hash,
@@ -702,15 +744,24 @@ class Pipeline:
         self, config, info, input_path,
         frames_dir, mattes_dir, segments_dir,
         num_to_process, total_stages,
-        *, fps_str, resume_seg=0, resume_frames=0,
+        *, fps_str, use_sbs, scaler,
+        resume_seg=0, resume_frames=0,
         cfg_hash="", estimated_disk_gb=0.0,
     ):
         """Run extraction and matting in interleaved chunks.
 
         For each chunk:
-          1. Extract N frames via ffmpeg keyframe seek
+          1. Extract N frames via ffmpeg keyframe seek, downscaled
+             by ffmpeg to the matting resolution (no PIL resizing)
           2. Matte each frame, flush segment, delete PNGs
           3. Save checkpoint for resume
+
+        While chunk N is being matted, chunk N+1 is extracted by a
+        background thread into a second directory so the GPU never
+        waits on ffmpeg (ffmpeg is a subprocess — no GIL contention).
+
+        Mattes are saved at matting resolution; the segment encoder
+        upscales back to original resolution in one ffmpeg pass.
 
         Processor(s) are created once (from the first frame of
         the first active chunk) and reused across all chunks.
@@ -724,25 +775,15 @@ class Pipeline:
         num_chunks = math.ceil(
             num_to_process / config.chunk_size
         )
-        use_sbs = config.is_sbs and detect_sbs(
-            info["width"], info["height"]
-        )
 
-        # Create scaler (per-eye dims for SBS)
-        if use_sbs:
-            eye_w = info["width"] // 2
-            scaler = FrameScaler(
-                config.max_matting_pixels,
-                (eye_w, info["height"]),
-            )
-        else:
-            scaler = FrameScaler(
-                config.max_matting_pixels,
-                (info["width"], info["height"]),
-            )
-
+        # ffmpeg extracts directly at matting resolution, so the
+        # per-frame PIL downscale/upscale is no longer needed.
         if scaler.active:
             tw, th = scaler.target_size
+            extract_size = (
+                (tw * 2, th) if use_sbs else (tw, th)
+            )
+            upscale_to = (info["width"], info["height"])
             self._emit(PipelineProgress(
                 stage=(
                     f"Processing at {tw}x{th} "
@@ -751,6 +792,24 @@ class Pipeline:
                 stage_num=2,
                 total_stages=total_stages,
             ))
+        else:
+            extract_size = None
+            upscale_to = None
+
+        # Second frames dir lets extraction of chunk N+1 overlap
+        # with matting of chunk N.
+        prefetch_dir = frames_dir.with_name("frames_prefetch")
+        prefetch_dir.mkdir(exist_ok=True)
+        chunk_dirs = (frames_dir, prefetch_dir)
+
+        def chunk_params(idx):
+            offset = idx * config.chunk_size
+            count = min(
+                config.chunk_size, num_to_process - offset
+            )
+            start = start_frame_0based + offset
+            ts = start / fps if fps > 0 else 0
+            return ts, count
 
         # Processor(s) — created lazily from first active chunk
         processor = None
@@ -760,6 +819,8 @@ class Pipeline:
         seg_idx = resume_seg
         global_frame_idx = resume_frames
 
+        pool = ThreadPoolExecutor(max_workers=1)
+        pending = None
         try:
             for chunk_idx in range(num_chunks):
                 chunk_offset = chunk_idx * config.chunk_size
@@ -771,20 +832,9 @@ class Pipeline:
                         "Pipeline cancelled by user"
                     )
 
-                # Extract this chunk
-                chunk_start = (
-                    start_frame_0based + chunk_offset
-                )
-                chunk_frames = min(
-                    config.chunk_size,
-                    num_to_process - chunk_offset,
-                )
-                ts = (
-                    chunk_start / fps if fps > 0 else 0
-                )
+                ts, chunk_frames = chunk_params(chunk_idx)
                 logger.info(
-                    f"Extracting chunk "
-                    f"{chunk_idx + 1}/{num_chunks} "
+                    f"Chunk {chunk_idx + 1}/{num_chunks} "
                     f"({chunk_frames} frames)..."
                 )
                 self._emit(PipelineProgress(
@@ -798,10 +848,33 @@ class Pipeline:
                     total_frames=num_to_process,
                 ))
 
-                frame_files = self._extract_chunk(
-                    input_path, frames_dir,
-                    ts, chunk_frames,
-                )
+                if pending is not None:
+                    # Chunk was prefetched during the previous
+                    # chunk's matting — usually ready already.
+                    frame_files = pending.result()
+                    pending = None
+                else:
+                    frame_files = self._extract_chunk(
+                        input_path,
+                        chunk_dirs[chunk_idx % 2],
+                        ts, chunk_frames,
+                        scale_to=extract_size,
+                    )
+
+                # Kick off extraction of the next chunk while
+                # this chunk is matting.
+                if chunk_idx + 1 < num_chunks:
+                    next_ts, next_frames = chunk_params(
+                        chunk_idx + 1
+                    )
+                    pending = pool.submit(
+                        self._extract_chunk,
+                        input_path,
+                        chunk_dirs[(chunk_idx + 1) % 2],
+                        next_ts, next_frames,
+                        scale_to=extract_size,
+                        quiet=True,
+                    )
 
                 if not frame_files:
                     logger.warning(
@@ -818,22 +891,20 @@ class Pipeline:
 
                 if use_sbs and proc_l is None:
                     self._init_sbs_processors(
-                        config, frame_files[0],
-                        scaler, needs_first,
+                        config, frame_files[0], needs_first,
                     )
                     proc_l = self._proc_l
                     proc_r = self._proc_r
                 elif not use_sbs and processor is None:
-                    first_arr = np.array(
-                        Image.open(
-                            frame_files[0]
-                        ).convert("RGB")
-                    )
-                    first_seed = (
-                        scaler.downscale(first_arr)
-                        if needs_first else None
-                    )
-                    del first_arr
+                    first_seed = None
+                    if needs_first:
+                        # Frames are already at matting
+                        # resolution — use directly.
+                        first_seed = np.array(
+                            Image.open(
+                                frame_files[0]
+                            ).convert("RGB")
+                        )
                     processor = self._make_processor(
                         config, first_seed
                     )
@@ -857,17 +928,12 @@ class Pipeline:
 
                     if use_sbs:
                         matte_arr = self._process_sbs_frame(
-                            frame_arr, proc_l, proc_r, scaler,
+                            frame_arr, proc_l, proc_r,
                         )
                     else:
-                        scaled = scaler.downscale(frame_arr)
                         matte_arr = processor.process_frame(
-                            scaled
+                            frame_arr
                         )
-                        matte_arr = scaler.upscale_matte(
-                            matte_arr
-                        )
-                        del scaled
 
                     seg_frame += 1
                     Image.fromarray(
@@ -902,6 +968,7 @@ class Pipeline:
                     self._flush_matte_segment(
                         mattes_dir, segments_dir, seg_idx,
                         fps_str=fps_str, crf=config.crf,
+                        upscale_to=upscale_to,
                     )
                     seg_idx += 1
 
@@ -923,16 +990,13 @@ class Pipeline:
                         )
                         ckpt.save(segments_dir.parent)
 
-                # Clear VRAM between chunks
-                try:
-                    import torch
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-                except ImportError:
-                    pass
-                gc.collect()
-
+        except BaseException:
+            # Make the background extractor's poll loop abort
+            # quickly so pool shutdown doesn't block.
+            self._cancelled = True
+            raise
         finally:
+            pool.shutdown(wait=True)
             if use_sbs:
                 if proc_l is not None:
                     proc_l.cleanup()
@@ -942,9 +1006,13 @@ class Pipeline:
                 processor.cleanup()
 
     def _init_sbs_processors(
-        self, config, first_frame_path, scaler, needs_first,
+        self, config, first_frame_path, needs_first,
     ):
-        """Create left/right eye processors for SBS mode."""
+        """Create left/right eye processors for SBS mode.
+
+        Frames arrive pre-scaled to matting resolution, so the
+        split eyes are used directly as processor seeds.
+        """
         logger.info("SBS mode: processing per-eye")
         first_full = np.array(
             Image.open(first_frame_path).convert("RGB")
@@ -953,12 +1021,11 @@ class Pipeline:
         del first_full
 
         if needs_first:
-            left_seed = scaler.downscale(left_f)
-            right_seed = scaler.downscale(right_f)
+            left_seed = left_f
+            right_seed = right_f
         else:
             left_seed = None
             right_seed = None
-        del left_f, right_f
 
         logger.info(
             "SBS: initialising left-eye processor..."
@@ -974,17 +1041,16 @@ class Pipeline:
         )
 
     @staticmethod
-    def _process_sbs_frame(frame_arr, proc_l, proc_r, scaler):
-        """Process one SBS frame through both eye processors."""
+    def _process_sbs_frame(frame_arr, proc_l, proc_r):
+        """Process one SBS frame through both eye processors.
+
+        The frame is already at matting resolution — no per-eye
+        scaling is needed.
+        """
         left, right = split_frame(frame_arr)
-        left = scaler.downscale(left)
-        right = scaler.downscale(right)
 
         left_m = proc_l.process_frame(left)
         right_m = proc_r.process_frame(right)
-
-        left_m = scaler.upscale_matte(left_m)
-        right_m = scaler.upscale_matte(right_m)
 
         matte = merge_mattes(left_m, right_m)
         del left, right, left_m, right_m
@@ -1041,11 +1107,16 @@ class Pipeline:
 
     def _flush_matte_segment(
         self, mattes_dir, segments_dir, seg_idx,
-        fps_str, crf,
+        fps_str, crf, upscale_to=None,
     ):
         """Encode PNGs into a segment video, then delete them.
 
         Uses libx264 with yuv420p for broad concat compatibility.
+
+        When ``upscale_to`` is set, mattes (saved at matting
+        resolution) are upscaled to the original resolution by
+        ffmpeg during the encode — one multithreaded LANCZOS pass
+        instead of a per-frame PIL resize.
         """
         segment_path = (
             segments_dir / f"segment_{seg_idx:06d}.mp4"
@@ -1056,7 +1127,11 @@ class Pipeline:
             "-framerate", fps_str,
             "-i", str(mattes_dir / "frame_%06d.png"),
         ]
-        tail = ["-pix_fmt", "yuv420p", str(segment_path)]
+        tail = []
+        if upscale_to is not None:
+            w, h = upscale_to
+            tail += ["-vf", f"scale={w}:{h}:flags=lanczos"]
+        tail += ["-pix_fmt", "yuv420p", str(segment_path)]
         devnull = dict(
             check=True,
             stdin=subprocess.DEVNULL,
@@ -1195,6 +1270,7 @@ class Pipeline:
         width, height, num_frames,
         total_frames=0, input_size=0,
         is_deovr=False, chunk_size=500,
+        extract_w=0, extract_h=0,
     ):
         """Estimate peak temp disk under the chunked pipeline.
 
@@ -1203,11 +1279,18 @@ class Pipeline:
 
         Peak = per-chunk PNGs + proportional input file size
         (for intermediates like fisheye conversions / matte video).
+
+        Frame PNGs are stored at extraction (matting) resolution
+        when the scaler is active. Source PNGs are double-buffered
+        (active chunk + prefetched next chunk); matte PNGs
+        accumulate up to one chunk before each segment flush.
         """
-        # Per-chunk source PNGs (deleted as matted, peak at
-        # the start of each chunk before matting begins)
-        source_png = int(width * height * 3 * 0.5)
-        chunk_pngs = source_png * min(num_frames, chunk_size)
+        ew = extract_w or width
+        eh = extract_h or height
+        source_png = int(ew * eh * 3 * 0.5)
+        matte_png = int(ew * eh * 0.5)
+        per_frame = source_png * 2 + matte_png
+        chunk_pngs = per_frame * min(num_frames, chunk_size)
 
         # Proportional input size for the processed range
         if total_frames > 0 and input_size > 0:

@@ -94,6 +94,14 @@ def ensure_correct_torch() -> None:
     Re-launches the current process if PyTorch was reinstalled so the
     new build is loaded cleanly.
     """
+    # Reduce VRAM fragmentation on long matting runs. Must be set
+    # before torch first initializes CUDA — the UI queries device
+    # info at startup, which is earlier than the pipeline's own
+    # configure_cuda_performance() call.
+    os.environ.setdefault(
+        "PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True"
+    )
+
     # Skip if we already verified in a parent invocation
     if os.environ.get(_BOOTSTRAP_ENV):
         os.environ.pop(_BOOTSTRAP_ENV, None)
