@@ -84,6 +84,61 @@ def _encode_args_cpu(codec: str, crf: int) -> list:
     return ["-c:v", codec, "-crf", str(crf)]
 
 
+@functools.lru_cache(maxsize=1)
+def nvenc_encode_works() -> bool:
+    """Probe whether h264_nvenc can actually encode.
+
+    ``-encoders`` listing NVENC does not guarantee a working
+    session (driver mismatch, GPU busy, session limit). Pipe
+    feeds cannot retry after a mid-stream encoder failure, so
+    the stream writer decides its encoder with this one-time
+    real test encode.
+    """
+    if not _detect_nvenc()["h264"]:
+        return False
+    try:
+        r = subprocess.run(
+            [
+                "ffmpeg", "-v", "error",
+                "-f", "lavfi",
+                "-i", "color=black:size=128x128:rate=30:duration=0.2",
+                "-c:v", "h264_nvenc",
+                "-f", "null", "-",
+            ],
+            capture_output=True, timeout=30,
+        )
+        ok = r.returncode == 0
+    except Exception:
+        ok = False
+    logger.info(
+        "NVENC probe: h264_nvenc "
+        + ("works" if ok else "unavailable, using libx264")
+    )
+    return ok
+
+
+def stream_encode_args(crf: int) -> list:
+    """Encoding args for pipe-fed segment encodes.
+
+    Prefers NVENC (verified by a real probe); falls back to
+    libx264 veryfast — segments are grayscale at matting
+    resolution, so CPU encode keeps up with matting easily.
+    """
+    if nvenc_encode_works():
+        return [
+            "-c:v", "h264_nvenc",
+            "-preset", "p4",
+            "-rc", "vbr",
+            "-cq", str(crf + 2),
+            "-b:v", "0",
+        ]
+    return [
+        "-c:v", "libx264",
+        "-preset", "veryfast",
+        "-crf", str(crf),
+    ]
+
+
 def _hwaccel_args() -> list:
     """Return hardware-accelerated decode args if NVENC is present."""
     nvenc = _detect_nvenc()

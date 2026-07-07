@@ -175,6 +175,8 @@ class Pipeline:
         timestamp: float, num_frames: int,
         scale_to: tuple[int, int] | None = None,
         quiet: bool = False,
+        fmt: str = "png",
+        sbs_split: bool = False,
     ) -> list[Path]:
         """Extract frames using fast keyframe seek.
 
@@ -185,29 +187,66 @@ class Pipeline:
 
         When ``scale_to`` is set, ffmpeg downscales frames to the
         matting resolution during extraction — its multithreaded
-        scaler replaces the per-frame PIL LANCZOS resize, and the
-        PNGs shrink proportionally (faster encode/decode + less
-        disk).  ``quiet`` suppresses progress emission for
-        background prefetch extractions.
+        scaler replaces the per-frame PIL LANCZOS resize.
+        ``quiet`` suppresses progress emission for background
+        prefetch extractions.
+
+        ``fmt='jpg'`` writes JPEGs (q2) instead of PNGs — much
+        faster codec, and the format SAM2-family loaders expect.
+        ``sbs_split=True`` crops the two SBS eyes into left/ and
+        right/ subdirectories in one ffmpeg pass (``scale_to``
+        is then per-eye); the returned list contains the LEFT
+        eye files — right files share the same basename under
+        right/.
         """
-        for f in frames_dir.glob("frame_*.png"):
-            try:
-                f.unlink()
-            except OSError:
-                pass
+        for pat in ("*.png", "*.jpg", "*/*.png", "*/*.jpg"):
+            for f in frames_dir.glob(pat):
+                try:
+                    f.unlink()
+                except OSError:
+                    pass
 
         from vrautomatte.utils.ffmpeg import _hwaccel_args
+        quality = ["-q:v", "2"] if fmt == "jpg" else []
         cmd = [
             "ffmpeg", "-y",
             *_hwaccel_args(),
             "-ss", f"{timestamp:.6f}",
             "-i", str(input_path),
-            "-frames:v", str(num_frames),
         ]
-        if scale_to is not None:
-            w, h = scale_to
-            cmd += ["-vf", f"scale={w}:{h}:flags=lanczos"]
-        cmd.append(str(frames_dir / "frame_%06d.png"))
+
+        if sbs_split:
+            left_dir = frames_dir / "left"
+            right_dir = frames_dir / "right"
+            left_dir.mkdir(exist_ok=True)
+            right_dir.mkdir(exist_ok=True)
+            scale = ""
+            if scale_to is not None:
+                w, h = scale_to
+                scale = f",scale={w}:{h}:flags=lanczos"
+            cmd += [
+                "-filter_complex",
+                (
+                    f"[0:v]crop=iw/2:ih:0:0{scale}[L];"
+                    f"[0:v]crop=iw/2:ih:iw/2:0{scale}[R]"
+                ),
+                "-map", "[L]",
+                "-frames:v", str(num_frames), *quality,
+                str(left_dir / f"%06d.{fmt}"),
+                "-map", "[R]",
+                "-frames:v", str(num_frames), *quality,
+                str(right_dir / f"%06d.{fmt}"),
+            ]
+            poll_dir = left_dir
+            result_glob = (left_dir, f"*.{fmt}")
+        else:
+            cmd += ["-frames:v", str(num_frames)]
+            if scale_to is not None:
+                w, h = scale_to
+                cmd += ["-vf", f"scale={w}:{h}:flags=lanczos"]
+            cmd += [*quality, str(frames_dir / f"%06d.{fmt}")]
+            poll_dir = frames_dir
+            result_glob = (frames_dir, f"*.{fmt}")
 
         process = subprocess.Popen(
             cmd,
@@ -229,7 +268,7 @@ class Pipeline:
             if quiet:
                 continue
             try:
-                count = len(os.listdir(frames_dir))
+                count = len(os.listdir(poll_dir))
             except OSError:
                 continue
             if count != last_count:
@@ -260,7 +299,8 @@ class Pipeline:
                 f"(exit code {process.returncode})"
             )
 
-        return sorted(frames_dir.glob("frame_*.png"))
+        glob_dir, glob_pat = result_glob
+        return sorted(glob_dir.glob(glob_pat))
 
     def _extract_frames_with_progress(
         self, cmd, frames_dir, expected, total_stages,
@@ -489,11 +529,14 @@ class Pipeline:
             if resume_frames > 0:
                 prefetch_dir = tmp / "frames_prefetch"
                 for d in (frames_dir, mattes_dir, prefetch_dir):
-                    for png in d.glob("*.png"):
-                        try:
-                            png.unlink()
-                        except OSError:
-                            pass
+                    for pat in (
+                        "*.png", "*.jpg", "*/*.png", "*/*.jpg",
+                    ):
+                        for f in d.glob(pat):
+                            try:
+                                f.unlink()
+                            except OSError:
+                                pass
 
             # Create scaler (per-eye dims for SBS) — determines
             # the extraction resolution and the disk estimate.
@@ -543,18 +586,39 @@ class Pipeline:
             total_stages = self._total_stages()
             self._matte_start_time = time.monotonic()
 
-            self._run_chunked_pipeline(
-                config, info, input_path,
-                frames_dir, mattes_dir, segments_dir,
-                num_to_process, total_stages,
-                fps_str=info["fps_str"],
-                use_sbs=use_sbs,
-                scaler=scaler,
-                resume_seg=resume_seg,
-                resume_frames=resume_frames,
-                cfg_hash=cfg_hash,
-                estimated_disk_gb=est_gb,
+            # Chunk-level models (SAM2Matting) need frames on
+            # disk; per-frame models stream via rawvideo pipes
+            # (no frame PNGs at all). VRAUTOMATTE_NO_STREAM=1
+            # forces the file-based path as an escape hatch.
+            chunk_level = config.model_variant == "sam2matting"
+            no_stream = (
+                os.environ.get("VRAUTOMATTE_NO_STREAM") == "1"
             )
+            if chunk_level or no_stream:
+                self._run_chunked_pipeline(
+                    config, info, input_path,
+                    frames_dir, mattes_dir, segments_dir,
+                    num_to_process, total_stages,
+                    fps_str=info["fps_str"],
+                    use_sbs=use_sbs,
+                    scaler=scaler,
+                    resume_seg=resume_seg,
+                    resume_frames=resume_frames,
+                    cfg_hash=cfg_hash,
+                    estimated_disk_gb=est_gb,
+                )
+            else:
+                self._run_stream_pipeline(
+                    config, info, input_path, segments_dir,
+                    num_to_process, total_stages,
+                    fps_str=info["fps_str"],
+                    use_sbs=use_sbs,
+                    scaler=scaler,
+                    resume_seg=resume_seg,
+                    resume_frames=resume_frames,
+                    cfg_hash=cfg_hash,
+                    estimated_disk_gb=est_gb,
+                )
 
             # ── Stage 3: Concatenate matte segments ──
             logger.info(
@@ -571,6 +635,41 @@ class Pipeline:
             )
 
             if config.output_format == OutputFormat.MATTE_ONLY:
+                if scaler.active:
+                    # Segments were encoded at matting
+                    # resolution — upscale once here.
+                    # File-to-file, so the NVENC fallback in
+                    # _run_ffmpeg_logged can safely retry.
+                    logger.info(
+                        "Upscaling matte to original "
+                        "resolution..."
+                    )
+                    self._emit(PipelineProgress(
+                        stage="Upscaling matte video",
+                        stage_num=3,
+                        total_stages=total_stages,
+                    ))
+                    from vrautomatte.utils.ffmpeg import (
+                        _encode_args,
+                        _run_ffmpeg_logged,
+                    )
+                    full_res = tmp / "matte_full.mp4"
+                    up_cmd = [
+                        "ffmpeg", "-y",
+                        "-i", str(matte_video),
+                        "-vf", (
+                            f"scale={info['width']}:"
+                            f"{info['height']}:flags=lanczos"
+                        ),
+                        *_encode_args("libx264", config.crf),
+                        "-pix_fmt", "yuv420p",
+                        str(full_res),
+                    ]
+                    _run_ffmpeg_logged(
+                        up_cmd, "matte-upscale",
+                        total_frames=num_to_process,
+                    )
+                    matte_video = full_res
                 self._copy_with_audio(
                     matte_video, input_path, output_path
                 )
@@ -760,12 +859,19 @@ class Pipeline:
         background thread into a second directory so the GPU never
         waits on ffmpeg (ffmpeg is a subprocess — no GIL contention).
 
-        Mattes are saved at matting resolution; the segment encoder
-        upscales back to original resolution in one ffmpeg pass.
+        Mattes are saved (and segments encoded) at matting
+        resolution — upscaling to original resolution happens
+        once at final assembly.
+
+        Per-frame processors (RVM, MatAnyone2) are stepped frame
+        by frame; chunk-level processors (SAM2Matting) receive
+        the whole chunk directory via ``process_chunk``. For SBS
+        with a chunk-level processor, ffmpeg splits the eyes
+        into left/ and right/ subdirectories during extraction.
 
         Processor(s) are created once (from the first frame of
         the first active chunk) and reused across all chunks.
-        Recurrent state carries across chunk boundaries.
+        Recurrent state / mask handoff carries across chunks.
         """
         fps = float(info["fps"])
         start_frame_0based = 0
@@ -776,14 +882,20 @@ class Pipeline:
             num_to_process / config.chunk_size
         )
 
+        chunk_level = config.model_variant == "sam2matting"
+        ext_fmt = "jpg" if chunk_level else "png"
+        sbs_split = chunk_level and use_sbs
+
         # ffmpeg extracts directly at matting resolution, so the
         # per-frame PIL downscale/upscale is no longer needed.
         if scaler.active:
             tw, th = scaler.target_size
-            extract_size = (
-                (tw * 2, th) if use_sbs else (tw, th)
-            )
-            upscale_to = (info["width"], info["height"])
+            if sbs_split:
+                extract_size = (tw, th)  # per-eye outputs
+            elif use_sbs:
+                extract_size = (tw * 2, th)
+            else:
+                extract_size = (tw, th)
             self._emit(PipelineProgress(
                 stage=(
                     f"Processing at {tw}x{th} "
@@ -794,7 +906,6 @@ class Pipeline:
             ))
         else:
             extract_size = None
-            upscale_to = None
 
         # Second frames dir lets extraction of chunk N+1 overlap
         # with matting of chunk N.
@@ -859,6 +970,8 @@ class Pipeline:
                         chunk_dirs[chunk_idx % 2],
                         ts, chunk_frames,
                         scale_to=extract_size,
+                        fmt=ext_fmt,
+                        sbs_split=sbs_split,
                     )
 
                 # Kick off extraction of the next chunk while
@@ -874,6 +987,8 @@ class Pipeline:
                         next_ts, next_frames,
                         scale_to=extract_size,
                         quiet=True,
+                        fmt=ext_fmt,
+                        sbs_split=sbs_split,
                     )
 
                 if not frame_files:
@@ -885,14 +1000,43 @@ class Pipeline:
 
                 # ── Create processor(s) on first chunk ──
                 needs_first = (
-                    config.model_variant == "matanyone2"
+                    config.model_variant
+                    in ("matanyone2", "sam2matting")
                     or config.pov_mode
                 )
 
                 if use_sbs and proc_l is None:
-                    self._init_sbs_processors(
-                        config, frame_files[0], needs_first,
-                    )
+                    if sbs_split:
+                        # frame_files are the left-eye files;
+                        # right eye shares the basename.
+                        left0 = np.array(Image.open(
+                            frame_files[0]
+                        ).convert("RGB"))
+                        right0 = np.array(Image.open(
+                            frame_files[0].parent.parent
+                            / "right" / frame_files[0].name
+                        ).convert("RGB"))
+                        logger.info(
+                            "SBS: initialising left-eye "
+                            "processor..."
+                        )
+                        self._proc_l = self._make_processor(
+                            config, left0
+                        )
+                        logger.info(
+                            "SBS: initialising right-eye "
+                            "processor..."
+                        )
+                        self._proc_r = self._make_processor(
+                            config, right0
+                        )
+                    else:
+                        first_full = np.array(Image.open(
+                            frame_files[0]
+                        ).convert("RGB"))
+                        self._init_sbs_processors(
+                            config, first_full, needs_first,
+                        )
                     proc_l = self._proc_l
                     proc_r = self._proc_r
                 elif not use_sbs and processor is None:
@@ -910,85 +1054,82 @@ class Pipeline:
                     )
 
                 # ── Process this chunk's frames ──
-                seg_frame = 0
-                for i, frame_file in enumerate(frame_files):
-                    if self._cancelled:
-                        raise InterruptedError(
-                            "Pipeline cancelled by user"
+                if chunk_level:
+                    seg_frame = self._matte_chunk_level(
+                        processor, proc_l, proc_r, use_sbs,
+                        chunk_dirs[chunk_idx % 2],
+                        frame_files, mattes_dir,
+                        global_frame_idx, num_to_process,
+                        estimated_disk_gb,
+                    )
+                    global_frame_idx += seg_frame
+                else:
+                    seg_frame = 0
+                    for i, frame_file in enumerate(frame_files):
+                        if self._cancelled:
+                            raise InterruptedError(
+                                "Pipeline cancelled by user"
+                            )
+
+                        if i % _DISK_CHECK_INTERVAL == 0:
+                            self._check_disk_free(mattes_dir)
+
+                        frame_arr = np.array(
+                            Image.open(
+                                frame_file
+                            ).convert("RGB")
                         )
 
-                    if i % _DISK_CHECK_INTERVAL == 0:
-                        self._check_disk_free(mattes_dir)
+                        if use_sbs:
+                            matte_arr = self._process_sbs_frame(
+                                frame_arr, proc_l, proc_r,
+                            )
+                        else:
+                            matte_arr = processor.process_frame(
+                                frame_arr
+                            )
 
-                    frame_arr = np.array(
-                        Image.open(
-                            frame_file
-                        ).convert("RGB")
-                    )
-
-                    if use_sbs:
-                        matte_arr = self._process_sbs_frame(
-                            frame_arr, proc_l, proc_r,
+                        seg_frame += 1
+                        Image.fromarray(
+                            matte_arr, mode="L"
+                        ).save(
+                            mattes_dir
+                            / f"frame_{seg_frame:06d}.png"
                         )
-                    else:
-                        matte_arr = processor.process_frame(
-                            frame_arr
+
+                        try:
+                            frame_file.unlink()
+                        except OSError:
+                            pass
+
+                        global_frame_idx += 1
+                        stage = (
+                            "Matting SBS (L+R)"
+                            if use_sbs
+                            else "Generating mattes"
                         )
-
-                    seg_frame += 1
-                    Image.fromarray(
-                        matte_arr, mode="L"
-                    ).save(
-                        mattes_dir
-                        / f"frame_{seg_frame:06d}.png"
-                    )
-
-                    try:
-                        frame_file.unlink()
-                    except OSError:
-                        pass
-
-                    global_frame_idx += 1
-                    stage = (
-                        "Matting SBS (L+R)"
-                        if use_sbs
-                        else "Generating mattes"
-                    )
-                    self._emit_matte_progress(
-                        global_frame_idx - 1,
-                        num_to_process,
-                        frame_arr, matte_arr,
-                        stage=stage,
-                        estimated_disk_gb=estimated_disk_gb,
-                    )
-                    del frame_arr, matte_arr
+                        self._emit_matte_progress(
+                            global_frame_idx - 1,
+                            num_to_process,
+                            frame_arr, matte_arr,
+                            stage=stage,
+                            estimated_disk_gb=estimated_disk_gb,
+                        )
+                        del frame_arr, matte_arr
 
                 # Flush segment
                 if seg_frame > 0:
                     self._flush_matte_segment(
                         mattes_dir, segments_dir, seg_idx,
                         fps_str=fps_str, crf=config.crf,
-                        upscale_to=upscale_to,
                     )
                     seg_idx += 1
-
-                    # Save checkpoint
-                    if config.auto_resume and cfg_hash:
-                        ckpt = PipelineCheckpoint(
-                            input_path=str(input_path),
-                            input_hash=hash_file_head(
-                                input_path
-                            ),
-                            config_hash=cfg_hash,
-                            total_frames=num_to_process,
-                            chunk_size=config.chunk_size,
-                            completed_segments=seg_idx,
-                            completed_frames=global_frame_idx,
-                            timestamp=time.strftime(
-                                "%Y-%m-%dT%H:%M:%S"
-                            ),
-                        )
-                        ckpt.save(segments_dir.parent)
+                    global_done = global_frame_idx
+                    self._save_checkpoint(
+                        config, cfg_hash, input_path,
+                        num_to_process, seg_idx,
+                        global_done, segments_dir,
+                    )
 
         except BaseException:
             # Make the background extractor's poll loop abort
@@ -1006,19 +1147,16 @@ class Pipeline:
                 processor.cleanup()
 
     def _init_sbs_processors(
-        self, config, first_frame_path, needs_first,
+        self, config, first_frame, needs_first,
     ):
         """Create left/right eye processors for SBS mode.
 
-        Frames arrive pre-scaled to matting resolution, so the
-        split eyes are used directly as processor seeds.
+        Args:
+            first_frame: Full SBS frame array at matting
+                resolution; split into per-eye seeds here.
         """
         logger.info("SBS mode: processing per-eye")
-        first_full = np.array(
-            Image.open(first_frame_path).convert("RGB")
-        )
-        left_f, right_f = split_frame(first_full)
-        del first_full
+        left_f, right_f = split_frame(first_frame)
 
         if needs_first:
             left_seed = left_f
@@ -1039,6 +1177,300 @@ class Pipeline:
         self._proc_r = self._make_processor(
             config, right_seed
         )
+
+    def _matte_chunk_level(
+        self, processor, proc_l, proc_r, use_sbs,
+        chunk_dir, frame_files, mattes_dir,
+        start_idx, total, estimated_disk_gb,
+    ):
+        """Run a chunk-level processor over one extracted chunk.
+
+        Chunk-level processors (SAM2Matting) consume a whole
+        frame directory and yield mattes as a generator. For
+        SBS the two eye generators are stepped in lockstep and
+        the mattes merged.
+
+        Returns:
+            Number of frames matted (matte PNGs written).
+        """
+        if use_sbs:
+            left_dir = chunk_dir / "left"
+            right_dir = chunk_dir / "right"
+            gen = zip(
+                proc_l.process_chunk(left_dir),
+                proc_r.process_chunk(right_dir),
+            )
+            stage = "Matting SBS (L+R)"
+        else:
+            gen = (
+                (m, None)
+                for m in processor.process_chunk(chunk_dir)
+            )
+            stage = "Generating mattes"
+
+        seg_frame = 0
+        for i, (m_left, m_right) in enumerate(gen):
+            if self._cancelled:
+                raise InterruptedError(
+                    "Pipeline cancelled by user"
+                )
+            if i % _DISK_CHECK_INTERVAL == 0:
+                self._check_disk_free(mattes_dir)
+
+            if m_right is not None:
+                matte_arr = merge_mattes(m_left, m_right)
+            else:
+                matte_arr = m_left
+
+            seg_frame += 1
+            Image.fromarray(matte_arr, mode="L").save(
+                mattes_dir / f"frame_{seg_frame:06d}.png"
+            )
+
+            idx = start_idx + i
+            # Load the source frame only when the progress
+            # emitter will actually use it (every 10th frame).
+            if idx % 10 == 0 or idx == total - 1:
+                src = None
+                if i < len(frame_files):
+                    src = np.array(Image.open(
+                        frame_files[i]
+                    ).convert("RGB"))
+                    if m_right is not None:
+                        right_f = (
+                            frame_files[i].parent.parent
+                            / "right" / frame_files[i].name
+                        )
+                        if right_f.exists():
+                            src = np.concatenate(
+                                [src, np.array(Image.open(
+                                    right_f
+                                ).convert("RGB"))],
+                                axis=1,
+                            )
+                self._emit_matte_progress(
+                    idx, total, src, matte_arr,
+                    stage=stage,
+                    estimated_disk_gb=estimated_disk_gb,
+                )
+
+        # Delete this chunk's source frames.
+        for f in frame_files:
+            try:
+                f.unlink()
+            except OSError:
+                pass
+            if use_sbs:
+                try:
+                    (f.parent.parent / "right"
+                     / f.name).unlink()
+                except OSError:
+                    pass
+
+        return seg_frame
+
+    def _save_checkpoint(
+        self, config, cfg_hash, input_path,
+        total_frames, seg_idx, frames_done, segments_dir,
+    ):
+        """Persist resume state after a segment flush."""
+        if not (config.auto_resume and cfg_hash):
+            return
+        ckpt = PipelineCheckpoint(
+            input_path=str(input_path),
+            input_hash=hash_file_head(input_path),
+            config_hash=cfg_hash,
+            total_frames=total_frames,
+            chunk_size=config.chunk_size,
+            completed_segments=seg_idx,
+            completed_frames=frames_done,
+            timestamp=time.strftime("%Y-%m-%dT%H:%M:%S"),
+        )
+        ckpt.save(segments_dir.parent)
+
+    # ── Streaming pipeline ───────────────────────────────────
+
+    def _run_stream_pipeline(
+        self, config, info, input_path, segments_dir,
+        num_to_process, total_stages,
+        *, fps_str, use_sbs, scaler,
+        resume_seg=0, resume_frames=0,
+        cfg_hash="", estimated_disk_gb=0.0,
+    ):
+        """Stream frames through matting via rawvideo pipes.
+
+        ffmpeg decodes (and downscales) the source into a raw
+        RGB pipe; mattes stream back out through a raw grayscale
+        pipe into the segment encoder. No frame images touch the
+        disk, and decode runs ahead of the GPU via the reader's
+        internal queue.
+
+        Segments are encoded at matting resolution and cut every
+        ``chunk_size`` frames so checkpoint/resume keeps working
+        exactly as in the file-based path.
+        """
+        from vrautomatte.pipeline.framestream import (
+            FrameStreamReader,
+            SegmentStreamWriter,
+        )
+
+        fps = float(info["fps"])
+        start_frame_0based = 0
+        if config.start_frame > 0:
+            start_frame_0based = config.start_frame - 1
+
+        if scaler.active:
+            tw, th = scaler.target_size
+            out_w = tw * 2 if use_sbs else tw
+            out_h = th
+            self._emit(PipelineProgress(
+                stage=(
+                    f"Processing at {tw}x{th} "
+                    f"for your GPU"
+                ),
+                stage_num=2,
+                total_stages=total_stages,
+            ))
+        else:
+            out_w, out_h = info["width"], info["height"]
+
+        remaining = num_to_process - resume_frames
+        start_ts = 0.0
+        if fps > 0:
+            start_ts = (
+                start_frame_0based + resume_frames
+            ) / fps
+
+        self._emit(PipelineProgress(
+            stage="Starting video stream",
+            stage_num=1,
+            total_stages=total_stages,
+            frame_num=resume_frames,
+            total_frames=num_to_process,
+        ))
+        reader = FrameStreamReader(
+            input_path, (out_w, out_h),
+            start_ts=start_ts,
+            num_frames=remaining,
+            scale=scaler.active,
+        )
+
+        needs_first = (
+            config.model_variant == "matanyone2"
+            or config.pov_mode
+        )
+        processor = None
+        proc_l = None
+        proc_r = None
+        writer = None
+        seg_idx = resume_seg
+        global_frame_idx = resume_frames
+        seg_frames = 0
+
+        try:
+            frame = reader.read()
+            if frame is None:
+                raise RuntimeError(
+                    "No frames decoded from input — check "
+                    "the file and frame range."
+                )
+
+            # ── Create processor(s) from the first frame ──
+            if use_sbs:
+                self._init_sbs_processors(
+                    config, frame, needs_first,
+                )
+                proc_l = self._proc_l
+                proc_r = self._proc_r
+            else:
+                processor = self._make_processor(
+                    config, frame if needs_first else None
+                )
+
+            stage = (
+                "Matting SBS (L+R)"
+                if use_sbs else "Generating mattes"
+            )
+
+            while frame is not None:
+                if self._cancelled:
+                    raise InterruptedError(
+                        "Pipeline cancelled by user"
+                    )
+                if (
+                    global_frame_idx % _DISK_CHECK_INTERVAL
+                    == 0
+                ):
+                    self._check_disk_free(segments_dir)
+
+                if use_sbs:
+                    matte_arr = self._process_sbs_frame(
+                        frame, proc_l, proc_r,
+                    )
+                else:
+                    matte_arr = processor.process_frame(
+                        frame
+                    )
+
+                if writer is None:
+                    writer = SegmentStreamWriter(
+                        segments_dir
+                        / f"segment_{seg_idx:06d}.mp4",
+                        (out_w, out_h), fps_str, config.crf,
+                    )
+                writer.write(matte_arr)
+                seg_frames += 1
+                global_frame_idx += 1
+
+                self._emit_matte_progress(
+                    global_frame_idx - 1,
+                    num_to_process,
+                    frame, matte_arr,
+                    stage=stage,
+                    estimated_disk_gb=estimated_disk_gb,
+                )
+
+                if seg_frames >= config.chunk_size:
+                    writer.close()
+                    writer = None
+                    seg_frames = 0
+                    seg_idx += 1
+                    self._save_checkpoint(
+                        config, cfg_hash, input_path,
+                        num_to_process, seg_idx,
+                        global_frame_idx, segments_dir,
+                    )
+
+                frame = reader.read()
+
+            # Final partial segment
+            if writer is not None:
+                writer.close()
+                writer = None
+                seg_idx += 1
+                self._save_checkpoint(
+                    config, cfg_hash, input_path,
+                    num_to_process, seg_idx,
+                    global_frame_idx, segments_dir,
+                )
+
+        except BaseException:
+            self._cancelled = True
+            if writer is not None:
+                # Partial segment can't be trusted — remove it
+                # so resume re-processes those frames.
+                writer.abort()
+                writer = None
+            raise
+        finally:
+            reader.close()
+            if use_sbs:
+                if proc_l is not None:
+                    proc_l.cleanup()
+                if proc_r is not None:
+                    proc_r.cleanup()
+            elif processor is not None:
+                processor.cleanup()
 
     @staticmethod
     def _process_sbs_frame(frame_arr, proc_l, proc_r):
@@ -1093,13 +1525,20 @@ class Pipeline:
         )
 
         if config.temporal_smoothing < 1.0:
-            processor = AlphaSmoother(
-                processor, weight=config.temporal_smoothing
-            )
-            logger.info(
-                f"Temporal smoothing enabled "
-                f"(weight={config.temporal_smoothing})"
-            )
+            if getattr(processor, "chunk_level", False):
+                logger.info(
+                    "Temporal smoothing skipped — not "
+                    "supported for chunk-level models"
+                )
+            else:
+                processor = AlphaSmoother(
+                    processor,
+                    weight=config.temporal_smoothing,
+                )
+                logger.info(
+                    f"Temporal smoothing enabled "
+                    f"(weight={config.temporal_smoothing})"
+                )
 
         return processor
 
@@ -1107,16 +1546,13 @@ class Pipeline:
 
     def _flush_matte_segment(
         self, mattes_dir, segments_dir, seg_idx,
-        fps_str, crf, upscale_to=None,
+        fps_str, crf,
     ):
         """Encode PNGs into a segment video, then delete them.
 
         Uses libx264 with yuv420p for broad concat compatibility.
-
-        When ``upscale_to`` is set, mattes (saved at matting
-        resolution) are upscaled to the original resolution by
-        ffmpeg during the encode — one multithreaded LANCZOS pass
-        instead of a per-frame PIL resize.
+        Segments stay at matting resolution — upscaling to the
+        original resolution happens once at final assembly.
         """
         segment_path = (
             segments_dir / f"segment_{seg_idx:06d}.mp4"
@@ -1127,11 +1563,7 @@ class Pipeline:
             "-framerate", fps_str,
             "-i", str(mattes_dir / "frame_%06d.png"),
         ]
-        tail = []
-        if upscale_to is not None:
-            w, h = upscale_to
-            tail += ["-vf", f"scale={w}:{h}:flags=lanczos"]
-        tail += ["-pix_fmt", "yuv420p", str(segment_path)]
+        tail = ["-pix_fmt", "yuv420p", str(segment_path)]
         devnull = dict(
             check=True,
             stdin=subprocess.DEVNULL,

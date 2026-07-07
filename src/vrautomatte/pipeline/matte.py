@@ -21,7 +21,9 @@ from loguru import logger
 from vrautomatte.utils.gpu import get_device
 
 # Valid model variant names
-VARIANTS = ["mobilenetv3", "resnet50", "matanyone2"]
+VARIANTS = [
+    "mobilenetv3", "resnet50", "matanyone2", "sam2matting",
+]
 
 
 @runtime_checkable
@@ -244,6 +246,38 @@ def create_processor(
             )
 
         return processor
+
+    if variant == "sam2matting":
+        from vrautomatte.pipeline.sam2matting import (
+            SAM2MattingProcessor,
+            prepare_environment,
+        )
+
+        if first_frame is None:
+            raise RuntimeError(
+                "SAM2Matting requires first_frame "
+                "for mask generation"
+            )
+
+        # Install the SAM2Matting fork on sys.path BEFORE the
+        # SAM2 mask generation below imports 'sam2'.
+        prepare_environment()
+
+        from vrautomatte.pipeline.sam2_masks import (
+            generate_first_frame_mask,
+        )
+
+        if device is None:
+            device = get_device()
+
+        mask = generate_first_frame_mask(
+            first_frame, device, pov_mode=pov_mode
+        )
+        return SAM2MattingProcessor(
+            first_frame_mask=mask,
+            device=device,
+            compile_model=compile_model,
+        )
 
     if variant == "matanyone2":
         from vrautomatte.pipeline.matanyone2 import (

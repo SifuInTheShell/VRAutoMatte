@@ -22,6 +22,12 @@ matanyone2 = [
     "matanyone2 @ git+https://github.com/pq-yang/MatAnyone2.git",
     "sam2>=1.0",
 ]
+# SAM2Matting needs the same sam2 stack; the model repo itself is
+# not pip-installable and is auto-downloaded on first use (see
+# pipeline/sam2matting.py).
+sam2matting = [
+    "sam2>=1.0",
+]
 
 [build-system]
 requires = ["hatchling"]

@@ -225,9 +225,10 @@ These trade (imperceptible) quality for speed and can be UI toggles:
 | 2 | 2.2 matte saved at model res, upscale in segment encode | ~10 lines | 1.3–1.6x | ✅ done (2026-07-07) |
 | 3 | 2.3 chunk prefetch thread | ~40 lines | 1.2–1.5x | ✅ done (2026-07-07) |
 | 4 | 3.4 drop per-chunk `empty_cache`; alloc-conf in bootstrap | ~5 lines | 1.1–1.3x | ✅ done (2026-07-07) |
-| 5 | 2.4 rawvideo pipe pipeline (replaces 1–3) | ~200 lines | GPU-bound | open |
+| 5 | 2.4 rawvideo pipe pipeline (replaces 1–3) | ~200 lines | GPU-bound | ✅ done (2026-07-07) — `pipeline/framestream.py`; PNG path kept for SAM2Matting + `VRAUTOMATTE_NO_STREAM=1` escape hatch |
 | 6 | 3.1 batched/streamed eyes, 3.2 pinned transfers | moderate | 1.3–2x | open |
 | 7 | Tier 3 toggles (half-rate matting, res selector) | small | up to 2x | open |
+| 8 | SAM2Matting variant (model-level speedup, see MODEL_RESEARCH_2026-07.md) | done | ~5–10x vs MA2 if claims hold | ✅ integrated (2026-07-07), needs on-GPU A/B |
 
 Note: 3.3 (torch.compile default-on) was deliberately NOT flipped — the
 existing try/except only catches wrap-time errors, but Triton failures on

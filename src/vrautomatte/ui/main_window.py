@@ -251,9 +251,13 @@ class MainWindow(QMainWindow):
             "• MatAnyone 2 (experimental) — Sharpest edges, "
             "best hair/transparency (~8 fps, ~6 GB VRAM). "
             "Tracks ONE person from the first frame.\n"
-            "⚠ Requires SAM2 mask — does NOT work with "
-            "fisheye or equirectangular VR content. "
-            "Use for standard flat video only."
+            "• SAM2Matting (trial) — New 2026 model: "
+            "claims MatAnyone-2-level quality at RVM-like "
+            "speed (~40 fps @1080p, <5 GB VRAM). "
+            "Tracks ONE person. Downloads model on first "
+            "use. Non-commercial license.\n"
+            "⚠ MatAnyone 2 / SAM2Matting require a SAM2 "
+            "mask — best for standard flat video."
         )
         row1.addWidget(model_label)
         self.model_combo = QComboBox()
@@ -264,6 +268,9 @@ class MainWindow(QMainWindow):
             "MatAnyone 2 (experimental, non-VR)"
             if self._ma2_available
             else "MatAnyone 2 (experimental) — click to install",
+            "SAM2Matting (trial) — 1 person, fast + sharp"
+            if self._ma2_available
+            else "SAM2Matting (trial) — click to install",
         ])
         self.model_combo.setToolTip(model_label.toolTip())
         self.model_combo.currentIndexChanged.connect(
@@ -1129,10 +1136,11 @@ class MainWindow(QMainWindow):
     def _on_model_changed(self, index: int):
         """Handle model combo selection change.
 
-        If MatAnyone 2 is selected but not installed,
-        trigger the install flow and revert to previous model.
+        MatAnyone 2 and SAM2Matting both need the sam2 extra;
+        if it's missing, trigger the install flow and revert
+        to the previous model.
         """
-        if index == 2 and not self._ma2_available:
+        if index in (2, 3) and not self._ma2_available:
             # Revert to previous selection before install
             self.model_combo.blockSignals(True)
             self.model_combo.setCurrentIndex(0)
@@ -1146,7 +1154,7 @@ class MainWindow(QMainWindow):
         c = self._colors
         if not self.pov_check.isChecked():
             self.pov_warning.setText("")
-        elif self.model_combo.currentIndex() == 2:
+        elif self.model_combo.currentIndex() in (2, 3):
             self.pov_warning.setText(
                 "✓ Best quality (instance matting)"
             )
@@ -1198,6 +1206,7 @@ class MainWindow(QMainWindow):
             0: "mobilenetv3",
             1: "resnet50",
             2: "matanyone2",
+            3: "sam2matting",
         }
 
         smooth_map = {0: 1.0, 1: 0.85, 2: 0.7, 3: 0.5}

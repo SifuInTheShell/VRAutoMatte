@@ -101,14 +101,23 @@ def hash_file_head(path: Path, size: int = 65536) -> str:
     return h.hexdigest()
 
 
+# Bumped when the pipeline's intermediate format changes in a way
+# that makes old checkpoints/segments unusable (e.g. segments now
+# encoded at matting resolution instead of original resolution).
+_PIPELINE_VERSION = 2
+
+
 def hash_config(config) -> str:
     """SHA-256 of PipelineConfig's processing-relevant fields.
 
     Excludes paths and temp settings that don't affect output.
+    Includes the pipeline version so checkpoints from older
+    pipeline formats are treated as stale.
     """
     d = asdict(config)
     for key in ("input_path", "output_path", "temp_dir"):
         d.pop(key, None)
+    d["_pipeline_version"] = _PIPELINE_VERSION
     serialized = json.dumps(d, sort_keys=True)
     return hashlib.sha256(serialized.encode()).hexdigest()
 
