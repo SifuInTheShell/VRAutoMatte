@@ -1682,11 +1682,17 @@ class Pipeline:
           i.e. MatAnyone2 — needs the VRAM headroom)
         - sequential fallback
         """
-        left, right = split_frame(frame_arr)
-
-        if proc_l is proc_r and getattr(
+        pair_capable = proc_l is proc_r and getattr(
             proc_l, "supports_pair", False
-        ):
+        )
+        # Pair-batched processors np.stack the eyes (a fresh
+        # contiguous copy), so views suffice; per-eye paths
+        # need contiguous copies for torch.from_numpy.
+        left, right = split_frame(
+            frame_arr, copy=not pair_capable
+        )
+
+        if pair_capable:
             left_m, right_m = proc_l.process_frame_pair(
                 left, right
             )

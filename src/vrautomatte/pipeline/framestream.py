@@ -183,19 +183,55 @@ class SegmentStreamWriter:
             stderr=subprocess.DEVNULL,
         )
         self.frames_written = 0
+        # Feeder thread: serializing + piping a 4 MB matte
+        # blocks the matting loop for milliseconds per frame
+        # (16% of it in a live profile) and encoder finalize
+        # stalls it for seconds. The bounded queue absorbs
+        # bursts and overlaps pipe I/O with matting.
+        self._q: queue.Queue = queue.Queue(maxsize=8)
+        self._feed_error: BaseException | None = None
+        self._feeder = threading.Thread(
+            target=self._feed_loop,
+            name="segment-feeder",
+            daemon=True,
+        )
+        self._feeder.start()
+
+    def _feed_loop(self) -> None:
+        while True:
+            matte = self._q.get()
+            if matte is None:
+                return
+            try:
+                self._proc.stdin.write(matte.tobytes())
+            except BaseException as exc:  # noqa: BLE001
+                self._feed_error = exc
+                return
 
     def write(self, matte: np.ndarray) -> None:
-        """Write one grayscale matte frame."""
-        self._proc.stdin.write(matte.tobytes())
+        """Queue one grayscale matte frame for encoding."""
+        if self._feed_error is not None:
+            raise RuntimeError(
+                f"Segment encoder feed failed for "
+                f"{self._path.name}"
+            ) from self._feed_error
+        self._q.put(matte)
         self.frames_written += 1
 
     def close(self) -> None:
         """Finish the segment and verify the encode succeeded."""
+        self._q.put(None)
+        self._feeder.join()
         try:
             self._proc.stdin.close()
         except OSError:
             pass
         ret = self._proc.wait()
+        if self._feed_error is not None:
+            raise RuntimeError(
+                f"Segment encoder feed failed for "
+                f"{self._path.name}"
+            ) from self._feed_error
         if ret != 0:
             raise RuntimeError(
                 f"Segment encoder failed (exit {ret}) for "
@@ -208,6 +244,13 @@ class SegmentStreamWriter:
 
     def abort(self) -> None:
         """Kill the encoder and remove the partial segment."""
+        self._feed_error = self._feed_error or RuntimeError(
+            "aborted"
+        )
+        try:
+            self._q.put_nowait(None)
+        except queue.Full:
+            pass
         try:
             self._proc.kill()
             self._proc.wait()

@@ -147,6 +147,8 @@ class POVExclusionProcessor:
             SceneChangeDetector,
         )
 
+        import threading
+
         self._inner = inner
         self._device = device or get_device()
         self._set_exclusion_mask(pov_body_mask)
@@ -158,6 +160,15 @@ class POVExclusionProcessor:
         self._scene_detector = SceneChangeDetector(
             cooldown_frames=120,
         )
+        # Scene-change refreshes run on a background thread —
+        # a synchronous SAM2 reload stalls matting for ~5s
+        # per fire, which tanks throughput whenever the
+        # subject is close/partial and the detector fires at
+        # every cooldown expiry. Matting continues with the
+        # previous mask and swaps when the new one is ready.
+        self._refresh_lock = threading.Lock()
+        self._refresh_thread: threading.Thread | None = None
+        self._refresh_result: tuple | None = None
 
     @property
     def supports_pair(self) -> bool:
@@ -201,13 +212,70 @@ class POVExclusionProcessor:
         )
         return generate_pov_body_mask(frame, self._device)
 
-    def _refresh_mask(self, frame: np.ndarray) -> None:
-        """Regenerate POV body mask from current frame."""
-        logger.info("Scene change — refreshing POV mask")
-        self._set_exclusion_mask(
-            self._generate_body_mask(frame)
+    def _kick_refresh(
+        self,
+        left: np.ndarray,
+        right: np.ndarray | None = None,
+    ) -> None:
+        """Regenerate exclusion mask(s) on a worker thread."""
+        import threading
+
+        if (
+            self._refresh_thread is not None
+            and self._refresh_thread.is_alive()
+        ):
+            return
+        l_snap = np.ascontiguousarray(left)
+        r_snap = (
+            np.ascontiguousarray(right)
+            if right is not None else None
         )
-        self._scene_detector.update_reference(frame)
+
+        def work():
+            try:
+                excl, bbox = self._to_exclusion(
+                    self._generate_body_mask(l_snap)
+                )
+                if r_snap is not None:
+                    excl_r, bbox_r = self._to_exclusion(
+                        self._generate_body_mask(r_snap)
+                    )
+                else:
+                    excl_r = bbox_r = None
+                with self._refresh_lock:
+                    self._refresh_result = (
+                        excl, bbox, excl_r, bbox_r,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    f"POV mask refresh failed: {exc}"
+                )
+
+        logger.info(
+            "Scene change — refreshing POV mask in "
+            "background"
+        )
+        self._refresh_thread = threading.Thread(
+            target=work, name="pov-refresh", daemon=True
+        )
+        self._refresh_thread.start()
+
+    def _adopt_refresh(self) -> None:
+        """Swap in a completed background refresh, if any."""
+        with self._refresh_lock:
+            res = self._refresh_result
+            self._refresh_result = None
+        if res is None:
+            return
+        excl, bbox, excl_r, bbox_r = res
+        self._exclusion, self._excl_bbox = excl, bbox
+        if excl_r is not None:
+            self._exclusion_r = excl_r
+            self._excl_bbox_r = bbox_r
+        logger.info(
+            "POV exclusion mask updated from background "
+            "refresh"
+        )
 
     def _apply_exclusion(
         self,
@@ -247,8 +315,9 @@ class POVExclusionProcessor:
 
     def process_frame(self, frame: np.ndarray) -> np.ndarray:
         """Process frame, refresh mask on scene change."""
+        self._adopt_refresh()
         if self._scene_detector.check(frame):
-            self._refresh_mask(frame)
+            self._kick_refresh(frame)
 
         matte = self._inner.process_frame(frame)
         return self._apply_exclusion(
@@ -257,23 +326,23 @@ class POVExclusionProcessor:
 
     def process_frame_pair(self, left, right):
         """Batched two-eye processing with per-eye exclusion."""
+        self._adopt_refresh()
         if self._exclusion_r is None:
+            # One-time synchronous init: the right eye must
+            # have its own mask before its first matte.
             logger.info(
                 "POV pair mode: generating right-eye "
                 "exclusion mask..."
             )
             self._exclusion_r, self._excl_bbox_r = (
                 self._to_exclusion(
-                    self._generate_body_mask(right)
+                    self._generate_body_mask(
+                        np.ascontiguousarray(right)
+                    )
                 )
             )
         if self._scene_detector.check(left):
-            self._refresh_mask(left)
-            self._exclusion_r, self._excl_bbox_r = (
-                self._to_exclusion(
-                    self._generate_body_mask(right)
-                )
-            )
+            self._kick_refresh(left, right)
 
         lm, rm = self._inner.process_frame_pair(left, right)
         return (

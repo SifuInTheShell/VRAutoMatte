@@ -33,18 +33,29 @@ def detect_sbs(width: int, height: int) -> bool:
     return is_sbs
 
 
-def split_frame(frame: np.ndarray) -> tuple:
+def split_frame(
+    frame: np.ndarray, copy: bool = True
+) -> tuple:
     """Split an SBS frame into left and right eyes.
 
     Args:
         frame: RGB array (H, W, 3) — full SBS width.
+        copy: Return contiguous copies (needed by consumers
+            that call torch.from_numpy per eye). Pass False
+            for pair-batched processors — they np.stack the
+            eyes anyway, so copying here just duplicates
+            ~6 MB of memcpy per frame.
 
     Returns:
         Tuple of (left_eye, right_eye), each (H, W/2, 3).
     """
     h, w, c = frame.shape
     mid = w // 2
-    return frame[:, :mid, :].copy(), frame[:, mid:, :].copy()
+    left = frame[:, :mid, :]
+    right = frame[:, mid:, :]
+    if copy:
+        return left.copy(), right.copy()
+    return left, right
 
 
 def merge_frames(
