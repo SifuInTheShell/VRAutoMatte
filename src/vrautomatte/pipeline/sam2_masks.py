@@ -146,14 +146,28 @@ def _select_pov_body_mask(
     Returns:
         Binary mask (H, W), uint8 (0 or 255).
     """
+    total_px = frame_shape[0] * frame_shape[1]
     scored = _score_pov_masks(masks, frame_shape)
     if len(scored) < 2:
         pov = scored[0][1]
     else:
         pov = scored[-1][1]
 
+    # A body mask must never dominate the frame — on people-
+    # free frames (intros, black cards) the degenerate
+    # fallback selects the whole visible area, and excluding
+    # everything blanks every matte. No exclusion is the
+    # correct degenerate answer.
+    if pov["area"] > 0.5 * total_px:
+        logger.warning(
+            "POV body mask degenerate "
+            f"({pov['area']}/{total_px} px) — likely no "
+            "person in frame; POV exclusion disabled until "
+            "the next scene change"
+        )
+        return np.zeros(frame_shape[:2], dtype=np.uint8)
+
     body = pov["segmentation"].astype(np.uint8) * 255
-    total_px = frame_shape[0] * frame_shape[1]
 
     h = frame_shape[0]
     dilate_px = max(int(h * 0.02), 3)

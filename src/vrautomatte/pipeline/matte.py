@@ -152,7 +152,12 @@ class POVExclusionProcessor:
         self._set_exclusion_mask(pov_body_mask)
         self._exclusion_r: np.ndarray | None = None
         self._excl_bbox_r: tuple | None = None
-        self._scene_detector = SceneChangeDetector()
+        # Long cooldown: every fire costs a SAM2 load + mask
+        # generation (~5s). Intro fades and continuous motion
+        # must not stampede it.
+        self._scene_detector = SceneChangeDetector(
+            cooldown_frames=120,
+        )
 
     @property
     def supports_pair(self) -> bool:
