@@ -126,6 +126,11 @@ class POVExclusionProcessor:
     A scene change detector monitors for drastic changes
     (e.g. laying → standing) and regenerates the mask.
 
+    Pair mode is forwarded to the inner processor so SBS eye
+    batching stays available with POV enabled; the right eye
+    gets its own exclusion mask, generated lazily from the
+    first right frame.
+
     Args:
         inner: The actual MatteProcessor (e.g. RVMProcessor).
         pov_body_mask: Binary mask (H, W), uint8 (0 or 255).
@@ -145,41 +150,49 @@ class POVExclusionProcessor:
         self._inner = inner
         self._device = device or get_device()
         self._set_exclusion_mask(pov_body_mask)
+        self._exclusion_r: np.ndarray | None = None
         self._scene_detector = SceneChangeDetector()
+
+    @property
+    def supports_pair(self) -> bool:
+        """Pair mode available iff the inner processor has it."""
+        return getattr(self._inner, "supports_pair", False)
+
+    @staticmethod
+    def _to_exclusion(mask: np.ndarray) -> np.ndarray:
+        """Binary body mask (255=body) -> float keep-factor."""
+        return 1.0 - mask.astype(np.float32) / 255.0
 
     def _set_exclusion_mask(
         self, mask: np.ndarray
     ) -> None:
-        """Set or update the exclusion mask."""
-        self._exclusion = (
-            1.0 - mask.astype(np.float32) / 255.0
-        )
+        """Set or update the (left/primary) exclusion mask."""
+        self._exclusion = self._to_exclusion(mask)
         logger.info(
             "POV exclusion mask set — "
             f"covers {(mask > 0).sum()} px"
         )
 
-    def _refresh_mask(self, frame: np.ndarray) -> None:
-        """Regenerate POV body mask from current frame."""
+    def _generate_body_mask(
+        self, frame: np.ndarray
+    ) -> np.ndarray:
         from vrautomatte.pipeline.sam2_masks import (
             generate_pov_body_mask,
         )
+        return generate_pov_body_mask(frame, self._device)
+
+    def _refresh_mask(self, frame: np.ndarray) -> None:
+        """Regenerate POV body mask from current frame."""
         logger.info("Scene change — refreshing POV mask")
-        new_mask = generate_pov_body_mask(
-            frame, self._device
+        self._set_exclusion_mask(
+            self._generate_body_mask(frame)
         )
-        self._set_exclusion_mask(new_mask)
         self._scene_detector.update_reference(frame)
 
-    def process_frame(self, frame: np.ndarray) -> np.ndarray:
-        """Process frame, refresh mask on scene change."""
-        if self._scene_detector.check(frame):
-            self._refresh_mask(frame)
-
-        matte = self._inner.process_frame(frame)
-
-        # Resize exclusion mask if frame size differs
-        excl = self._exclusion
+    def _apply_exclusion(
+        self, matte: np.ndarray, excl: np.ndarray
+    ) -> np.ndarray:
+        """Multiply matte by the exclusion keep-factor."""
         if excl.shape != matte.shape:
             from PIL import Image as _Img
             excl_img = _Img.fromarray(
@@ -188,12 +201,42 @@ class POVExclusionProcessor:
                 (matte.shape[1], matte.shape[0]),
                 _Img.NEAREST,
             )
-            excl = 1.0 - np.array(excl_img).astype(
-                np.float32
-            ) / 255.0
-
-        result = (matte.astype(np.float32) * excl)
+            excl = (
+                np.array(excl_img).astype(np.float32)
+                / 255.0
+            )
+        result = matte.astype(np.float32) * excl
         return result.clip(0, 255).astype(np.uint8)
+
+    def process_frame(self, frame: np.ndarray) -> np.ndarray:
+        """Process frame, refresh mask on scene change."""
+        if self._scene_detector.check(frame):
+            self._refresh_mask(frame)
+
+        matte = self._inner.process_frame(frame)
+        return self._apply_exclusion(matte, self._exclusion)
+
+    def process_frame_pair(self, left, right):
+        """Batched two-eye processing with per-eye exclusion."""
+        if self._exclusion_r is None:
+            logger.info(
+                "POV pair mode: generating right-eye "
+                "exclusion mask..."
+            )
+            self._exclusion_r = self._to_exclusion(
+                self._generate_body_mask(right)
+            )
+        if self._scene_detector.check(left):
+            self._refresh_mask(left)
+            self._exclusion_r = self._to_exclusion(
+                self._generate_body_mask(right)
+            )
+
+        lm, rm = self._inner.process_frame_pair(left, right)
+        return (
+            self._apply_exclusion(lm, self._exclusion),
+            self._apply_exclusion(rm, self._exclusion_r),
+        )
 
     def reset(self) -> None:
         """Reset inner processor and scene detector."""
