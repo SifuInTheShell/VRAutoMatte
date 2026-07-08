@@ -216,6 +216,7 @@ def create_processor(
     use_long_term: bool = True,
     compile_model: bool = False,
     roi_matting: bool = False,
+    max_subjects: int = 1,
 ) -> MatteProcessor:
     """Create a matting processor for the given variant.
 
@@ -301,11 +302,25 @@ def create_processor(
         if device is None:
             device = get_device()
 
-        mask = generate_first_frame_mask(
-            first_frame, device, pov_mode=pov_mode
-        )
+        if max_subjects > 1:
+            from vrautomatte.pipeline.sam2_masks import (
+                generate_person_masks,
+            )
+            masks = generate_person_masks(
+                first_frame, device,
+                max_people=max_subjects,
+                pov_mode=pov_mode,
+            )
+            logger.info(
+                f"SAM2Matting: tracking {len(masks)} "
+                f"subject(s) (requested {max_subjects})"
+            )
+        else:
+            masks = generate_first_frame_mask(
+                first_frame, device, pov_mode=pov_mode
+            )
         return SAM2MattingProcessor(
-            first_frame_mask=mask,
+            first_frame_mask=masks,
             device=device,
             compile_model=compile_model,
         )

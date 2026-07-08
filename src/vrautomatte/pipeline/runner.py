@@ -122,6 +122,10 @@ class PipelineConfig:
     # eyes can't share one batched model, i.e. MatAnyone2).
     # Roughly doubles peak VRAM — auto-enabled on >=24 GB GPUs.
     sbs_parallel_eyes: bool = False
+    # Number of people to track (SAM2Matting only; each subject
+    # is a separate SAM2 object). RVM mattes everyone natively;
+    # MatAnyone2 tracks one subject (union mask for several).
+    max_subjects: int = 1
 
     # ── Disk management ───────────────────────────────────────
     chunk_size: int = 500
@@ -1661,6 +1665,7 @@ class Pipeline:
             use_long_term=config.ma2_use_long_term,
             compile_model=config.ma2_compile_model,
             roi_matting=config.roi_matting,
+            max_subjects=config.max_subjects,
         )
 
         if config.temporal_smoothing < 1.0:

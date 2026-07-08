@@ -185,12 +185,40 @@ def _find_config(repo: Path, model_size: str) -> str:
     return f"configs/{candidates[0]}.yaml"
 
 
+def alpha_to_planes(alpha) -> np.ndarray:
+    """Normalize a predictor alpha output to uint8 [N, H, W].
+
+    Accepts torch tensors or arrays shaped [N,1,H,W], [N,H,W],
+    [1,H,W] or [H,W] in either 0..1 or 0..255 range. One plane
+    per tracked object.
+    """
+    a = alpha
+    if hasattr(a, "detach"):
+        a = a.detach().float().cpu().numpy()
+    a = np.asarray(a, dtype=np.float32)
+    while a.ndim > 3 and a.shape[1] == 1:
+        a = a[:, 0]          # [N,1,H,W] -> [N,H,W]
+    while a.ndim > 3:
+        a = a[0]             # defensive: drop leading dims
+    if a.ndim == 2:
+        a = a[None]          # [H,W] -> [1,H,W]
+    if a.size and a.max() <= 1.5:
+        a = a * 255.0
+    return np.clip(a, 0, 255).astype(np.uint8)
+
+
 class SAM2MattingProcessor:
     """Chunk-level matting via the SAM2Matting video predictor.
 
+    Supports 1..N tracked subjects: each first-frame mask is
+    registered as its own SAM2 object; the per-object alphas
+    are merged (max) into one output matte, and each object's
+    final matte seeds its mask prompt for the next chunk.
+
     Args:
-        first_frame_mask: Binary mask (H, W) uint8 of the subject
-            in the first frame, at matting resolution.
+        first_frame_mask: Binary mask (H, W) uint8 of the
+            subject — or a LIST of masks for multi-subject
+            tracking — at matting resolution.
         device: torch device (auto if None).
         model_size: 'tiny' (recommended) or 'baseplus'.
         compile_model: Pass the upstream vos_optimized/compile
@@ -201,7 +229,7 @@ class SAM2MattingProcessor:
 
     def __init__(
         self,
-        first_frame_mask: np.ndarray,
+        first_frame_mask,
         device=None,
         *,
         model_size: str = "tiny",
@@ -246,7 +274,14 @@ class SAM2MattingProcessor:
             )
         logger.info("SAM2Matting loaded")
 
-        self._next_mask = first_frame_mask
+        if isinstance(first_frame_mask, np.ndarray):
+            self._next_masks = [first_frame_mask]
+        else:
+            self._next_masks = list(first_frame_mask)
+        if len(self._next_masks) > 1:
+            logger.info(
+                f"Tracking {len(self._next_masks)} subjects"
+            )
 
     # ── chunk-level API ─────────────────────────────────────
 
@@ -255,26 +290,27 @@ class SAM2MattingProcessor:
     ) -> Iterator[np.ndarray]:
         """Matte one chunk directory of frames.
 
-        Yields one uint8 (H, W) matte per frame. The last matte
-        is kept (binarized) as the mask prompt for the next
-        chunk, carrying the subject across chunk boundaries.
+        Yields one uint8 (H, W) matte per frame (max-merged
+        over all tracked subjects). Each subject's final matte
+        of the chunk is kept (binarized) as its mask prompt for
+        the next chunk, carrying every subject across chunk
+        boundaries.
         """
         torch = self._torch
         predictor = self._predictor
 
         state = self._init_state(str(frames_dir))
         try:
-            mask = torch.from_numpy(
-                self._next_mask > 127
-            )
-            predictor.add_new_mask(
-                inference_state=state,
-                frame_idx=0,
-                obj_id=1,
-                mask=mask.to(self._device),
-            )
+            for obj_idx, m in enumerate(self._next_masks):
+                mask = torch.from_numpy(m > 127)
+                predictor.add_new_mask(
+                    inference_state=state,
+                    frame_idx=0,
+                    obj_id=obj_idx + 1,
+                    mask=mask.to(self._device),
+                )
 
-            last = None
+            last_planes = None
             with torch.no_grad():
                 for out in predictor.propagate_in_video(
                     state
@@ -282,15 +318,49 @@ class SAM2MattingProcessor:
                     # Upstream yields:
                     # (frame_idx, obj_ids, mask_logits,
                     #  alpha, ...)
-                    alpha = out[3]
-                    matte = self._alpha_to_uint8(alpha)
-                    last = matte
-                    yield matte
+                    planes = alpha_to_planes(out[3])
+                    last_planes = planes
+                    yield planes.max(axis=0)
 
-            if last is not None:
-                self._next_mask = last
+            self._update_handoff(last_planes)
         finally:
             self._release_state(state)
+
+    def _update_handoff(self, planes) -> None:
+        """Seed next chunk's mask prompts from final mattes.
+
+        Per-object when the predictor returns one alpha plane
+        per tracked subject; otherwise the merged matte carries
+        on as a single object (subjects fuse — logged once).
+        Objects whose matte went empty (subject left frame)
+        keep their previous mask so they can be re-acquired.
+        """
+        if planes is None:
+            return
+        n_obj = len(self._next_masks)
+        if planes.shape[0] == n_obj:
+            for i in range(n_obj):
+                if planes[i].max() > 127:
+                    self._next_masks[i] = planes[i]
+                else:
+                    logger.debug(
+                        f"Subject {i + 1} not visible at "
+                        "chunk end — keeping previous mask"
+                    )
+        else:
+            if n_obj > 1 and not getattr(
+                self, "_merge_warned", False
+            ):
+                logger.warning(
+                    "Predictor returned a combined alpha "
+                    f"({planes.shape[0]} plane(s) for "
+                    f"{n_obj} subjects) — continuing with "
+                    "merged tracking"
+                )
+                self._merge_warned = True
+            merged = planes.max(axis=0)
+            if merged.max() > 127:
+                self._next_masks = [merged]
 
     def _init_state(self, frames_dir: str):
         """init_state with video frames offloaded to CPU RAM."""
@@ -310,19 +380,6 @@ class SAM2MattingProcessor:
         except Exception:  # noqa: BLE001
             pass
         del state
-
-    def _alpha_to_uint8(self, alpha) -> np.ndarray:
-        """Convert the predictor's alpha output to uint8 HxW."""
-        a = alpha
-        if hasattr(a, "detach"):
-            a = a.detach().float().cpu().numpy()
-        a = np.asarray(a, dtype=np.float32)
-        a = np.squeeze(a)
-        if a.ndim == 3:
-            a = a[0]
-        if a.max() <= 1.5:
-            a = a * 255.0
-        return np.clip(a, 0, 255).astype(np.uint8)
 
     # ── MatteProcessor protocol ─────────────────────────────
 

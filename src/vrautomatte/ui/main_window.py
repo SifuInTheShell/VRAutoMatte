@@ -277,6 +277,25 @@ class MainWindow(QMainWindow):
             self._on_model_changed
         )
         row1.addWidget(self.model_combo)
+        row1.addSpacing(12)
+
+        subjects_label = QLabel("Subjects:")
+        subjects_label.setToolTip(
+            "How many people to track (SAM2Matting only).\n\n"
+            "Each subject is tracked as a separate object; "
+            "their mattes are merged into one alpha.\n"
+            "• RVM models matte ALL people automatically — "
+            "this setting is ignored.\n"
+            "• MatAnyone 2 tracks one combined mask — this "
+            "setting is ignored."
+        )
+        row1.addWidget(subjects_label)
+        self.subjects_combo = QComboBox()
+        self.subjects_combo.addItems(["1", "2", "3", "4"])
+        self.subjects_combo.setToolTip(
+            subjects_label.toolTip()
+        )
+        row1.addWidget(self.subjects_combo)
         row1.addSpacing(20)
         format_label = QLabel("Output Format:")
         format_label.setToolTip(
@@ -798,6 +817,9 @@ class MainWindow(QMainWindow):
         self.parallel_eyes_check.setChecked(
             s.get("parallel_eyes", False)
         )
+        self.subjects_combo.setCurrentIndex(
+            s.get("max_subjects", 0)
+        )
         self.preview_check.setChecked(
             s.get("preview_enabled", True)
         )
@@ -828,6 +850,9 @@ class MainWindow(QMainWindow):
             "matting_res": self.res_combo.currentIndex(),
             "parallel_eyes": (
                 self.parallel_eyes_check.isChecked()
+            ),
+            "max_subjects": (
+                self.subjects_combo.currentIndex()
             ),
             "preview_enabled": self.preview_check.isChecked(),
             "window_width": self.width(),
@@ -1338,6 +1363,9 @@ class MainWindow(QMainWindow):
             ),
             sbs_parallel_eyes=(
                 self.parallel_eyes_check.isChecked()
+            ),
+            max_subjects=(
+                self.subjects_combo.currentIndex() + 1
             ),
         )
 

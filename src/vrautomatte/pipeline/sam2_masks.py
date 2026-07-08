@@ -345,6 +345,114 @@ def _select_all_person_masks(
     return combined
 
 
+def _select_person_masks_multi(
+    masks: list, frame_shape: tuple,
+    max_people: int = 4,
+    min_score: float = 0.4,
+    overlap_thresh: float = 0.5,
+) -> list[np.ndarray]:
+    """Select up to N distinct person masks, best-first.
+
+    Greedy pick by person-likeness score with overlap
+    de-duplication: SAM2's automatic masks often nest
+    (torso-inside-person), so a candidate covering more than
+    ``overlap_thresh`` of an already-picked mask (or vice
+    versa, relative to the smaller area) is skipped.
+
+    Args:
+        masks: SAM2 mask list with 'segmentation'/'area'.
+        frame_shape: (H, W, C).
+        max_people: Maximum number of masks to return.
+        min_score: Minimum person-likeness for extra subjects
+            (the first/best subject is always returned).
+
+    Returns:
+        List of 1..max_people binary masks (H, W), uint8
+        (0 or 255), ordered best-first.
+    """
+    scored = _score_person_masks(masks, frame_shape)
+    picked: list[np.ndarray] = []
+    picked_bool: list[np.ndarray] = []
+
+    for score, m in scored:
+        if len(picked) >= max_people:
+            break
+        if picked and score < min_score:
+            break
+        seg = m["segmentation"]
+        seg_area = seg.sum()
+        if seg_area == 0:
+            continue
+        duplicate = False
+        for prev in picked_bool:
+            inter = np.logical_and(seg, prev).sum()
+            smaller = min(seg_area, prev.sum())
+            if smaller > 0 and inter / smaller > overlap_thresh:
+                duplicate = True
+                break
+        if duplicate:
+            continue
+        picked_bool.append(seg)
+        picked.append(seg.astype(np.uint8) * 255)
+        logger.info(
+            f"Subject {len(picked)}: score={score:.2f}, "
+            f"area={seg_area}"
+        )
+
+    if not picked:
+        picked = [
+            scored[0][1]["segmentation"].astype(np.uint8)
+            * 255
+        ]
+    return picked
+
+
+def generate_person_masks(
+    frame: np.ndarray,
+    device: torch.device | None = None,
+    max_people: int = 2,
+    pov_mode: bool = False,
+) -> list[np.ndarray]:
+    """Auto-generate separate per-person masks from frame 1.
+
+    Used for multi-subject tracking (SAM2Matting): each mask
+    becomes its own tracked object. In POV mode, candidates
+    overlapping the detected POV body are excluded first.
+
+    Args:
+        frame: RGB array (H, W, 3), uint8.
+        device: Target device. Auto-detected if None.
+        max_people: Maximum subjects to track (1-4 typical).
+        pov_mode: Exclude the POV body from the candidates.
+
+    Returns:
+        List of binary masks (H, W), uint8 (0 or 255).
+    """
+    masks = _run_sam2_masks(frame, device)
+
+    if pov_mode and len(masks) > 1:
+        pov_scored = _score_pov_masks(masks, frame.shape)
+        pov_seg = pov_scored[-1][1]["segmentation"]
+        pov_area = max(pov_seg.sum(), 1)
+
+        def is_pov(m):
+            inter = np.logical_and(
+                m["segmentation"], pov_seg
+            ).sum()
+            smaller = min(
+                m["segmentation"].sum(), pov_area
+            )
+            return smaller > 0 and inter / smaller > 0.5
+
+        filtered = [m for m in masks if not is_pov(m)]
+        if filtered:
+            masks = filtered
+
+    return _select_person_masks_multi(
+        masks, frame.shape, max_people=max_people
+    )
+
+
 def generate_first_frame_mask(
     frame: np.ndarray,
     device: torch.device | None = None,
