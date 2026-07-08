@@ -129,10 +129,11 @@ class MatAnyone2Processor:
 
         model = MatAnyone2.from_pretrained("PeiqingYang/MatAnyone2")
 
-        # FP16: halve weight + activation memory
-        if self._use_fp16:
-            model = model.half()
-            logger.debug("MatAnyone 2: model cast to FP16")
+        # FP16 comes from the autocast context, NOT weight
+        # casting: matanyone2 disables autocast internally for
+        # numerically sensitive regions (big_modules.py), where
+        # float tensors would crash against half weights. Keep
+        # weights fp32; autocast runs the heavy ops in fp16.
 
         # Channels-last: align conv ops with cuDNN fastest path
         if device.type == "cuda":
@@ -235,9 +236,9 @@ class MatAnyone2Processor:
         else:
             gpu = cpu_t.to(self.device)
 
+        # Stay fp32 — autocast casts per-op where safe; the
+        # library's autocast-disabled regions need float.
         t = gpu.permute(2, 0, 1).float().div(255.0)
-        if self._use_fp16:
-            t = t.half()
         if self.device.type == "cuda":
             # channels_last requires 4-D input
             t = (
@@ -302,10 +303,11 @@ class MatAnyone2Processor:
         img_tensor = self._to_tensor(frame)
 
         with torch.no_grad(), self._autocast():
-            mask_tensor = torch.from_numpy(self._mask).float()
-            if self._use_fp16:
-                mask_tensor = mask_tensor.half()
-            mask_tensor = mask_tensor.to(self.device)
+            mask_tensor = (
+                torch.from_numpy(self._mask)
+                .float()
+                .to(self.device)
+            )
             self._processor.step(
                 img_tensor,
                 mask_tensor,
@@ -387,6 +389,9 @@ class MatAnyone2Processor:
         Returns:
             Alpha matte for the frame.
         """
+        # Normalize to 0/255 — a 0/1 mask (roi.py sends one)
+        # seeds an empty matte in InferenceCore.step.
+        mask = (mask > 0).astype(np.uint8) * 255
         return self._reinit_with_mask(frame, mask)
 
     def reset(self) -> None:
