@@ -113,7 +113,14 @@ class MatAnyone2Processor:
             from vrautomatte.pipeline.scene_detect import (
                 SceneChangeDetector,
             )
-            self._scene_detector = SceneChangeDetector()
+            # Long cooldown: at 60fps VR the detector's real
+            # job is hard cuts, not continuous motion — and a
+            # reseed wipes MA2's temporal memory, so firing
+            # cheaply must stay rare.
+            self._scene_detector = SceneChangeDetector(
+                cooldown_frames=120,
+            )
+        self._last_matte: np.ndarray | None = None
 
         # Apply global CUDA performance flags (TF32, cuDNN benchmark,
         # expandable allocator) before model weights are loaded.
@@ -349,21 +356,47 @@ class MatAnyone2Processor:
             and not self._is_first_frame
             and self._scene_detector.check(frame)
         ):
-            from vrautomatte.pipeline.sam2_masks import (
-                generate_first_frame_mask,
+            # Reseed from the tracked matte when it looks
+            # sane — near-free. Full SAM2 re-detection costs
+            # seconds (and can fall back to the very slow
+            # AMG on motion-blurred frames), so it is the
+            # last resort for a degenerate matte only.
+            prev = self._last_matte
+            coverage = (
+                (prev > 127).mean()
+                if prev is not None else 0.0
             )
-            logger.info("Scene change — regenerating MA2 mask")
-            new_mask = generate_first_frame_mask(
-                frame, self.device, pov_mode=True
-            )
-            matte = self._reinit_with_mask(frame, new_mask)
+            if 0.005 <= coverage <= 0.70:
+                logger.info(
+                    "Scene change — reseeding MA2 from "
+                    "tracked matte"
+                )
+                matte = self._reinit_with_mask(
+                    frame,
+                    ((prev > 127) * 255).astype(np.uint8),
+                )
+            else:
+                from vrautomatte.pipeline.sam2_masks import (
+                    generate_first_frame_mask,
+                )
+                logger.info(
+                    "Scene change — regenerating MA2 mask"
+                )
+                new_mask = generate_first_frame_mask(
+                    frame, self.device, pov_mode=True
+                )
+                matte = self._reinit_with_mask(
+                    frame, new_mask
+                )
             self._scene_detector.update_reference(frame)
+            self._last_matte = matte
             return matte
 
         if self._is_first_frame:
             matte = self._process_first_frame(frame)
             if self._scene_detector is not None:
                 self._scene_detector.update_reference(frame)
+            self._last_matte = matte
             return matte
 
         img_tensor = self._to_tensor(frame)
@@ -371,7 +404,9 @@ class MatAnyone2Processor:
         with torch.no_grad(), self._autocast():
             output = self._processor.step(img_tensor)
 
-        return self._extract_matte(output)
+        matte = self._extract_matte(output)
+        self._last_matte = matte
+        return matte
 
     def reseed(
         self, frame: np.ndarray, mask: np.ndarray

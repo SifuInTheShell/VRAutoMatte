@@ -103,7 +103,12 @@ class PipelineConfig:
     use_fp16: bool = True
     ma2_internal_size: int = 480
     ma2_mem_frames: int = 3
-    ma2_use_long_term: bool = True
+    # Long-term memory OFF by default: its consolidation
+    # (topk over huge affinity tensors) hits multi-second
+    # allocator stalls on Windows (no expandable_segments
+    # under WDDM) — measured 16x slower (0.24 vs 3.93
+    # fps/eye) with identical mattes on real content.
+    ma2_use_long_term: bool = False
     ma2_compile_model: bool = False
 
     # ── Temporal smoothing ──────────────────────────────────────
