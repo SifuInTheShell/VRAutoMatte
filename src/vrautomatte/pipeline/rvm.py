@@ -261,8 +261,9 @@ class RVMProcessor:
         return mattes[0], mattes[1]
 
     def cleanup(self) -> None:
-        """Release model and GPU memory."""
-        del self.model
+        """Release model and GPU memory. Idempotent."""
+        if hasattr(self, "model"):
+            del self.model
         self.rec = [None] * 4
         if torch.cuda.is_available():
             torch.cuda.empty_cache()

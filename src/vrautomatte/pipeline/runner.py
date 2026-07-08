@@ -1205,7 +1205,9 @@ class Pipeline:
             if use_sbs:
                 if proc_l is not None:
                     proc_l.cleanup()
-                if proc_r is not None:
+                # Pair-batched SBS shares one processor for
+                # both eyes — don't clean it up twice.
+                if proc_r is not None and proc_r is not proc_l:
                     proc_r.cleanup()
             elif processor is not None:
                 processor.cleanup()
@@ -1661,7 +1663,9 @@ class Pipeline:
             if use_sbs:
                 if proc_l is not None:
                     proc_l.cleanup()
-                if proc_r is not None:
+                # Pair-batched SBS shares one processor for
+                # both eyes — don't clean it up twice.
+                if proc_r is not None and proc_r is not proc_l:
                     proc_r.cleanup()
             elif processor is not None:
                 processor.cleanup()
