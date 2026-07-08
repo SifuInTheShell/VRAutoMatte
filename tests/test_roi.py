@@ -141,6 +141,50 @@ class TestROICropper(unittest.TestCase):
         self.assertEqual(rm2[250, 305], 255)
         self.assertEqual(lm2[250, 205], 255)
 
+    def test_probe_finds_new_subject_outside_window(self):
+        """A second person entering far from the tracked one
+        must be picked up by the periodic full-frame probe."""
+
+        class ProbeProcessor(BrightnessProcessor):
+            def probe_frame(self, frame):
+                return (
+                    frame.mean(axis=2) > 100
+                ).astype(np.uint8) * 255
+
+        inner = ProbeProcessor()
+        roi = ROICropper(inner, probe_interval=5)
+
+        # Subject A alone — anchor a tight window on them
+        f_one = _frame_with_subject(
+            self.H, self.W, 100, 200, 100, 200
+        )
+        for _ in range(3):
+            roi.process_frame(f_one)
+        self.assertIsNotNone(roi._window)
+
+        # Subject B appears in the far corner
+        f_two = f_one.copy()
+        f_two[380:470, 380:470] = 200
+
+        found_at = None
+        for i in range(12):
+            m = roi.process_frame(f_two)
+            if m[420, 420] == 255:
+                found_at = i
+                break
+        self.assertIsNotNone(
+            found_at,
+            "new subject never detected by probe",
+        )
+        self.assertLessEqual(found_at, 6)
+        # Both subjects matted once re-anchored
+        self.assertEqual(m[150, 150], 255)
+
+    def test_no_probe_without_probe_frame(self):
+        """Models without probe_frame keep interval 0 (off)."""
+        roi = ROICropper(BrightnessProcessor())
+        self.assertEqual(roi._probe_interval, 0)
+
     def test_reseed_preferred_over_reset(self):
         class ReseedProcessor(BrightnessProcessor):
             def __init__(self):

@@ -217,6 +217,24 @@ class RVMProcessor:
 
         return (pha[0, 0] * 255).byte().cpu().numpy()
 
+    def probe_frame(self, frame: np.ndarray) -> np.ndarray:
+        """Stateless full-frame matte for subject detection.
+
+        Runs a single forward pass with FRESH recurrent state
+        and discards it — the streaming state (usually shaped
+        for a crop window) is untouched. Used by ROI cropping
+        to periodically scan the full frame for people entering
+        outside the current window. Single-frame quality is
+        lower than recurrent output, which is fine for
+        detection.
+        """
+        src = self._to_device(frame[None])
+        with torch.no_grad():
+            fgr, pha, *_ = self.model(
+                src, *([None] * 4), self.downsample_ratio
+            )
+        return (pha[0, 0] * 255).byte().cpu().numpy()
+
     def process_frame_pair(
         self, left: np.ndarray, right: np.ndarray
     ) -> tuple[np.ndarray, np.ndarray]:

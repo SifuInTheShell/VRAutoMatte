@@ -69,7 +69,12 @@ class ROICropper:
             (re)anchoring the window.
     """
 
-    def __init__(self, inner, margin: float = 0.35):
+    def __init__(
+        self,
+        inner,
+        margin: float = 0.35,
+        probe_interval: int = 90,
+    ):
         self._inner = inner
         self._margin = margin
         self._window: tuple | None = None
@@ -77,6 +82,16 @@ class ROICropper:
         self._needs_reseed = False
         self._full_w = 0
         self._full_h = 0
+        # Periodic full-frame probe: all-people models (RVM)
+        # would otherwise never see a NEW subject entering the
+        # scene outside the current window. Every N frames a
+        # stateless full-frame pass checks for subject pixels
+        # beyond the window and re-anchors if found. 0 = off.
+        self._probe_interval = (
+            probe_interval
+            if hasattr(inner, "probe_frame") else 0
+        )
+        self._since_probe = 0
 
     @property
     def supports_pair(self) -> bool:
@@ -170,6 +185,41 @@ class ROICropper:
             else:
                 logger.debug("ROI: subject too large, full-frame")
 
+    def _maybe_probe(self, full_frame) -> None:
+        """Periodic full-frame scan for subjects outside the
+        window (new person entering the scene).
+
+        Only runs while a window is active and the inner model
+        offers a stateless ``probe_frame``. On detection, the
+        window re-anchors to cover everyone and the inner
+        processor is reseeded/reset on the next frame.
+        """
+        if self._probe_interval <= 0 or self._window is None:
+            return
+        self._since_probe += 1
+        if self._since_probe < self._probe_interval:
+            return
+        self._since_probe = 0
+
+        probe = self._inner.probe_frame(full_frame)
+        bbox = _matte_bbox(probe)
+        if bbox is None:
+            return
+        if self._window_ok(bbox):
+            return  # everyone already inside the window
+
+        h, w = full_frame.shape[:2]
+        logger.debug(
+            "ROI probe: subject outside window — re-anchoring"
+        )
+        self._window = self._compute_window(bbox, h, w)
+        self._needs_reseed = True
+        # Seed the next reseed mask from the probe so the new
+        # subject is part of it.
+        self._prev_matte = np.maximum(
+            self._prev_matte, probe
+        ) if self._prev_matte is not None else probe
+
     def _run_inner(self, crop, mask_crop):
         """Step the inner processor, reseeding after a window move."""
         if self._needs_reseed:
@@ -188,6 +238,7 @@ class ROICropper:
 
     def process_frame(self, frame: np.ndarray) -> np.ndarray:
         h, w = frame.shape[:2]
+        self._maybe_probe(frame)
         win = self._window
 
         if win is None or self._prev_matte is None:
@@ -218,6 +269,7 @@ class ROICropper:
         for batch processing, which needs equal shapes.
         """
         h, w = left.shape[:2]
+        self._maybe_probe(left)
         win = self._window
 
         if win is None or self._prev_matte is None:
