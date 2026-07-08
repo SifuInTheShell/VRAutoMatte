@@ -328,10 +328,6 @@ def create_processor(
                 "for mask generation"
             )
 
-        # Install the SAM2Matting fork on sys.path BEFORE the
-        # SAM2 mask generation below imports 'sam2'.
-        prepare_environment()
-
         from vrautomatte.pipeline.sam2_masks import (
             generate_first_frame_mask,
         )
@@ -339,6 +335,11 @@ def create_processor(
         if device is None:
             device = get_device()
 
+        # First-frame masks need the STOCK sam2 install — the
+        # SAM2Matting fork ships neither the automatic mask
+        # generator nor the standard model configs. Generate
+        # them first; prepare_environment() below then purges
+        # the stock modules so the fork loads fresh.
         if max_subjects > 1:
             from vrautomatte.pipeline.sam2_masks import (
                 generate_person_masks,
@@ -356,6 +357,7 @@ def create_processor(
             masks = generate_first_frame_mask(
                 first_frame, device, pov_mode=pov_mode
             )
+        prepare_environment()
         return SAM2MattingProcessor(
             first_frame_mask=masks,
             device=device,

@@ -11,11 +11,14 @@ Deployment notes
   package; it ships a *fork* of the ``sam2`` package with the
   matting heads added. We download the repo into the model cache
   and prepend it to ``sys.path`` so ``import sam2`` resolves to the
-  fork. The fork is a superset of stock SAM2, so the existing SAM2
-  first-frame mask generation keeps working against it.
-- Because of that package shadowing, stock ``sam2`` must not be
-  imported before the fork's path is installed. ``prepare_environment``
-  enforces this and asks for an app restart if it's too late.
+  fork. The fork is NOT a superset of stock SAM2 — it ships neither
+  ``automatic_mask_generator`` nor the standard model configs, so
+  first-frame mask generation must run against the STOCK install
+  BEFORE the fork is activated (see the sam2matting branch in
+  ``matte.create_processor``).
+- Because of that package shadowing, ``prepare_environment`` purges
+  any stock ``sam2`` modules from ``sys.modules`` so the fork
+  imports fresh afterwards.
 - Checkpoints (e.g. SAM2Matting-SAM2.1Tiny.pt) go into the repo's
   ``checkpoints/`` directory. We attempt a Hugging Face download;
   if that fails the error tells the user where to put the file.
@@ -32,6 +35,7 @@ the next chunk's mask prompt, carrying the subject across chunk
 boundaries.
 """
 
+import gc
 import os
 import sys
 import urllib.request
@@ -112,8 +116,9 @@ def ensure_repo() -> Path:
 def prepare_environment() -> Path:
     """Ensure the SAM2Matting fork of ``sam2`` will be imported.
 
-    Must run BEFORE anything imports ``sam2`` in this process.
-    Returns the repo path.
+    If the stock sam2 package is loaded (e.g. from first-frame
+    mask generation), its modules are purged so the next
+    ``import sam2`` resolves to the fork. Returns the repo path.
     """
     repo = ensure_repo()
     repo_str = str(repo)
@@ -123,12 +128,17 @@ def prepare_environment() -> Path:
             sys.modules["sam2"], "__file__", ""
         ) or ""
         if not mod_file.startswith(repo_str):
-            raise RuntimeError(
-                "The stock 'sam2' package was already imported "
-                "in this session — SAM2Matting needs its own "
-                "sam2 fork loaded first. Restart the app and "
-                "select SAM2Matting before running any "
-                "MatAnyone2/SAM2 job."
+            stale = [
+                name for name in sys.modules
+                if name == "sam2"
+                or name.startswith("sam2.")
+            ]
+            for name in stale:
+                del sys.modules[name]
+            gc.collect()
+            logger.debug(
+                f"Purged {len(stale)} stock sam2 modules "
+                "so the SAM2Matting fork loads fresh"
             )
     if repo_str not in sys.path:
         sys.path.insert(0, repo_str)
@@ -151,9 +161,13 @@ def _ensure_checkpoint(repo: Path, model_size: str) -> Path:
             f"Downloading {filename} from Hugging Face "
             f"({_HF_REPO})..."
         )
+        # The HF repo stores weights under checkpoints/;
+        # local_dir=repo preserves that layout, so the file
+        # lands exactly at the manual-placement path (ckpt).
         path = hf_hub_download(
-            repo_id=_HF_REPO, filename=filename,
-            local_dir=str(ckpt_dir),
+            repo_id=_HF_REPO,
+            filename=f"checkpoints/{filename}",
+            local_dir=str(repo),
         )
         return Path(path)
     except Exception as exc:  # noqa: BLE001

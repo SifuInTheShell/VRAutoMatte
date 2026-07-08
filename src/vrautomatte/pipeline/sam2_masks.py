@@ -160,6 +160,48 @@ def _select_pov_body_mask(
     return body
 
 
+def _load_stock_amg():
+    """Load SAM2AutomaticMaskGenerator from the stock install.
+
+    The SAM2Matting fork shadows the stock sam2 package on
+    sys.path but does not ship automatic_mask_generator. The
+    stock module file runs fine against the fork — every
+    sam2.* name it imports (modeling, utils.amg,
+    sam2_image_predictor) exists there — so locate it in the
+    stock install and register it under the active package.
+    """
+    import importlib.util
+    import sys
+    from pathlib import Path
+
+    import sam2
+
+    active_dir = Path(sam2.__file__).parent
+    for entry in sys.path:
+        candidate = (
+            Path(entry) / "sam2"
+            / "automatic_mask_generator.py"
+        )
+        if (
+            candidate.is_file()
+            and candidate.parent != active_dir
+        ):
+            spec = importlib.util.spec_from_file_location(
+                "sam2.automatic_mask_generator", candidate
+            )
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[spec.name] = module
+            spec.loader.exec_module(module)
+            logger.debug(f"Stock AMG loaded from {candidate}")
+            return module.SAM2AutomaticMaskGenerator
+    raise ImportError(
+        "sam2.automatic_mask_generator not found — the active "
+        f"sam2 package ({active_dir}) does not ship it and no "
+        "stock sam2 install is on sys.path. "
+        "Install with: uv sync --extra matanyone2"
+    )
+
+
 def _run_sam2_masks(
     frame: np.ndarray,
     device: torch.device | None = None,
@@ -179,14 +221,19 @@ def _run_sam2_masks(
         from sam2.sam2_image_predictor import (
             SAM2ImagePredictor,
         )
-        from sam2.automatic_mask_generator import (
-            SAM2AutomaticMaskGenerator,
-        )
     except ImportError:
         raise ImportError(
             "sam2 is required for POV mode / MatAnyone 2. "
             "Install with: uv sync --extra matanyone2"
         )
+    try:
+        from sam2.automatic_mask_generator import (
+            SAM2AutomaticMaskGenerator,
+        )
+    except ImportError:
+        # SAM2Matting's sam2 fork lacks this module — pull it
+        # from the stock install instead.
+        SAM2AutomaticMaskGenerator = _load_stock_amg()
 
     if device is None:
         device = get_device()
