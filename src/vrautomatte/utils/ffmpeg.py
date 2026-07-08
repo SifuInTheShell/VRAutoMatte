@@ -101,7 +101,11 @@ def nvenc_encode_works() -> bool:
             [
                 "ffmpeg", "-v", "error",
                 "-f", "lavfi",
-                "-i", "color=black:size=128x128:rate=30:duration=0.2",
+                # 256x256: newer NVENC generations reject tiny
+                # frames ("Frame Dimension less than the
+                # minimum supported value" at 128x128 on
+                # RTX 50xx).
+                "-i", "color=black:size=256x256:rate=30:duration=0.2",
                 "-c:v", "h264_nvenc",
                 "-f", "null", "-",
             ],
