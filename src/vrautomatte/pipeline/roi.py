@@ -38,6 +38,25 @@ _BBOX_THRESHOLD = 16
 _EDGE_PAD = 24
 # Window dims are rounded up to multiples of this.
 _QUANTUM = 64
+# Window sizes snap UP to this ladder of frame fractions.
+# Every NEW conv shape costs a cuDNN benchmark re-search
+# (seconds for resnet50) plus a recurrent-state reset, so an
+# approaching subject must step through a handful of stable
+# sizes — not every 64 px of growth.
+_SIZE_LADDER = (0.375, 0.5, 0.625, 0.75, 0.875)
+
+
+def _snap_size(needed: int, full: int) -> int:
+    """Smallest ladder rung (64px-aligned) >= needed."""
+    for frac in _SIZE_LADDER:
+        rung = min(
+            full,
+            ((int(full * frac) + _QUANTUM - 1)
+             // _QUANTUM) * _QUANTUM,
+        )
+        if rung >= needed:
+            return rung
+    return full
 # If the padded subject bbox covers more than this fraction of
 # the frame, process full-frame (ROI gives no benefit).
 _MAX_COVERAGE = 0.72
@@ -113,17 +132,10 @@ class ROICropper:
         pad_x = int(bw * self._margin)
         pad_y = int(bh * self._margin)
 
-        # Quantized target dims (multiples of _QUANTUM, even).
-        win_w = min(
-            w,
-            (bw + 2 * pad_x + _QUANTUM - 1)
-            // _QUANTUM * _QUANTUM,
-        )
-        win_h = min(
-            h,
-            (bh + 2 * pad_y + _QUANTUM - 1)
-            // _QUANTUM * _QUANTUM,
-        )
+        # Target dims snapped to the coarse size ladder so
+        # conv shapes stay stable as the subject grows.
+        win_w = _snap_size(bw + 2 * pad_x, w)
+        win_h = _snap_size(bh + 2 * pad_y, h)
         if win_w * win_h > _MAX_COVERAGE * w * h:
             return None
 
