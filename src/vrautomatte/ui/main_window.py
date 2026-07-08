@@ -101,13 +101,18 @@ def _detect_lens_tag(filename: str) -> tuple[bool, int, str]:
 
 
 def _check_matanyone2() -> bool:
-    """Check if MatAnyone 2 + SAM2 dependencies are installed."""
-    try:
-        import sam2  # noqa: F401
-        import matanyone2  # noqa: F401
-        return True
-    except ImportError:
-        return False
+    """Check if MatAnyone 2 + SAM2 dependencies are installed.
+
+    Uses find_spec instead of importing: loading the stock
+    sam2 package here would poison the session for
+    SAM2Matting, which must load its own sam2 fork first.
+    """
+    import importlib.util
+    return (
+        importlib.util.find_spec("sam2") is not None
+        and importlib.util.find_spec("matanyone2")
+        is not None
+    )
 
 
 class MainWindow(QMainWindow):
