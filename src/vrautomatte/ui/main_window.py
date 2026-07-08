@@ -166,12 +166,14 @@ class MainWindow(QMainWindow):
         scroll_content = QWidget()
         scroll.setWidget(scroll_content)
         root = QVBoxLayout(scroll_content)
-        root.setSpacing(10)
-        root.setContentsMargins(18, 18, 18, 18)
+        root.setSpacing(6)
+        root.setContentsMargins(12, 8, 12, 8)
 
         # ── File I/O ──
         io_group = QGroupBox("Files")
         io_layout = QVBoxLayout(io_group)
+        io_layout.setSpacing(4)
+        io_layout.setContentsMargins(10, 4, 10, 6)
 
         # Input row
         in_row = QHBoxLayout()
@@ -207,11 +209,8 @@ class MainWindow(QMainWindow):
         out_row.addWidget(self.output_btn)
         io_layout.addLayout(out_row)
 
-        # Video info
+        # Frame range + video info share one compact row
         self.info_label = QLabel("")
-        io_layout.addWidget(self.info_label)
-
-        # Frame range (optional)
         range_row = QHBoxLayout()
         range_row.addWidget(QLabel("Frame range:"))
         self.start_frame_edit = QLineEdit()
@@ -237,6 +236,7 @@ class MainWindow(QMainWindow):
         )
         range_row.addWidget(self.range_info)
         range_row.addStretch()
+        range_row.addWidget(self.info_label)
         self.start_frame_edit.textChanged.connect(
             lambda: self._update_range_info()
         )
@@ -250,6 +250,8 @@ class MainWindow(QMainWindow):
         # ── Settings ──
         settings_group = QGroupBox("Settings")
         settings_layout = QVBoxLayout(settings_group)
+        settings_layout.setSpacing(4)
+        settings_layout.setContentsMargins(10, 4, 10, 6)
 
         # Row 1: Model + Output Format
         row1 = QHBoxLayout()
@@ -651,12 +653,7 @@ class MainWindow(QMainWindow):
             "completed chunk on restart."
         )
         chunk_row.addWidget(self.resume_check)
-        chunk_row.addStretch()
-        settings_layout.addLayout(chunk_row)
-
-        root.addWidget(settings_group)
-
-        # ── Preview toggle (inside scroll with settings) ──
+        chunk_row.addSpacing(20)
         self.preview_check = QCheckBox("Preview")
         self.preview_check.setChecked(True)
         self.preview_check.setToolTip(
@@ -666,7 +663,11 @@ class MainWindow(QMainWindow):
         self.preview_check.stateChanged.connect(
             self._toggle_preview_images
         )
-        settings_layout.addWidget(self.preview_check)
+        chunk_row.addWidget(self.preview_check)
+        chunk_row.addStretch()
+        settings_layout.addLayout(chunk_row)
+
+        root.addWidget(settings_group)
 
         # ── Preview widget ──
         self.preview = PreviewWidget()
@@ -716,7 +717,7 @@ class MainWindow(QMainWindow):
 
         # ── Action bar (pinned at bottom) ──
         action_bar = QWidget()
-        action_bar.setContentsMargins(18, 0, 18, 0)
+        action_bar.setContentsMargins(12, 0, 12, 0)
         ab_layout = QVBoxLayout(action_bar)
         ab_layout.setSpacing(4)
         ab_layout.setContentsMargins(0, 0, 0, 8)
