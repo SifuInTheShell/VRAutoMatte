@@ -116,7 +116,8 @@ class PipelineConfig:
     # fraction of the frame, as in VR passthrough.
     roi_matting: bool = True
     # Matte every Nth frame and interpolate alpha in between
-    # (stream path only). 1 = every frame, 2 = half-rate (~2x).
+    # (stream path + SAM2Matting chunk path). 1 = every
+    # frame, 2 = half-rate (~2x).
     matte_stride: int = 1
     # Run the two SBS eye models concurrently (only applies when
     # eyes can't share one batched model, i.e. MatAnyone2).
@@ -1267,8 +1268,10 @@ class Pipeline:
                 matte_arr = m_left
 
             seg_frame += 1
+            # Temp-only files — fastest PNG compression.
             Image.fromarray(matte_arr, mode="L").save(
-                mattes_dir / f"frame_{seg_frame:06d}.png"
+                mattes_dir / f"frame_{seg_frame:06d}.png",
+                compress_level=1,
             )
 
             idx = start_idx + i
@@ -1666,6 +1669,7 @@ class Pipeline:
             compile_model=config.ma2_compile_model,
             roi_matting=config.roi_matting,
             max_subjects=config.max_subjects,
+            matte_stride=config.matte_stride,
         )
 
         if config.temporal_smoothing < 1.0:

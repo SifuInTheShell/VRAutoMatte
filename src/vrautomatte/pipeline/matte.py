@@ -262,6 +262,7 @@ def create_processor(
     compile_model: bool = False,
     roi_matting: bool = False,
     max_subjects: int = 1,
+    matte_stride: int = 1,
 ) -> MatteProcessor:
     """Create a matting processor for the given variant.
 
@@ -404,6 +405,7 @@ def create_processor(
             first_frame_mask=masks,
             device=device,
             compile_model=compile_model,
+            matte_stride=matte_stride,
         )
 
     if variant == "matanyone2":
