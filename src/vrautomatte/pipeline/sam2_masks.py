@@ -232,46 +232,62 @@ def _run_sam2_masks(
 
     Returns:
         List of SAM2 mask dicts.
+
+    Runs inside stock_sam2(): once the SAM2Matting fork is
+    active in a session (any earlier sam2matting processor),
+    ``import sam2`` would resolve to the fork, which lacks
+    both the automatic mask generator and the standard model
+    configs. The context sidelines the fork for the duration
+    and restores it after.
     """
-    try:
-        from sam2.sam2_image_predictor import (
-            SAM2ImagePredictor,
+    from vrautomatte.pipeline.sam2matting import stock_sam2
+
+    with stock_sam2():
+        try:
+            from sam2.sam2_image_predictor import (
+                SAM2ImagePredictor,
+            )
+        except ImportError:
+            raise ImportError(
+                "sam2 is required for POV mode / "
+                "MatAnyone 2. Install with: "
+                "uv sync --extra matanyone2"
+            )
+        try:
+            from sam2.automatic_mask_generator import (
+                SAM2AutomaticMaskGenerator,
+            )
+        except ImportError:
+            # Safety net — with the fork sidelined this
+            # should not trigger, but pull the module from
+            # the stock install if it somehow does.
+            SAM2AutomaticMaskGenerator = _load_stock_amg()
+
+        if device is None:
+            device = get_device()
+
+        variant = _SAM2_VARIANTS.get(
+            device.type, _SAM2_VARIANTS["cpu"]
         )
-    except ImportError:
-        raise ImportError(
-            "sam2 is required for POV mode / MatAnyone 2. "
-            "Install with: uv sync --extra matanyone2"
+        logger.info(
+            f"Loading SAM2 ({variant}) on {device}..."
         )
-    try:
-        from sam2.automatic_mask_generator import (
-            SAM2AutomaticMaskGenerator,
+
+        predictor = SAM2ImagePredictor.from_pretrained(
+            variant, device=str(device)
         )
-    except ImportError:
-        # SAM2Matting's sam2 fork lacks this module — pull it
-        # from the stock install instead.
-        SAM2AutomaticMaskGenerator = _load_stock_amg()
+        mask_gen = SAM2AutomaticMaskGenerator(
+            predictor.model
+        )
 
-    if device is None:
-        device = get_device()
+        logger.info("Generating masks from first frame...")
+        masks = mask_gen.generate(frame)
 
-    variant = _SAM2_VARIANTS.get(
-        device.type, _SAM2_VARIANTS["cpu"]
-    )
-    logger.info(f"Loading SAM2 ({variant}) on {device}...")
-
-    predictor = SAM2ImagePredictor.from_pretrained(
-        variant, device=str(device)
-    )
-    mask_gen = SAM2AutomaticMaskGenerator(predictor.model)
-
-    logger.info("Generating masks from first frame...")
-    masks = mask_gen.generate(frame)
-
-    del mask_gen, predictor
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-    logger.debug("SAM2 unloaded, GPU memory freed")
+        del mask_gen, predictor
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        logger.debug("SAM2 unloaded, GPU memory freed")
 
     if not masks:
         raise RuntimeError(

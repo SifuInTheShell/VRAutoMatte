@@ -147,22 +147,39 @@ def prepare_environment() -> Path:
     return repo
 
 
+def _fork_path_hint() -> str | None:
+    """Where the fork lives if present — never downloads."""
+    env_path = os.environ.get(_REPO_ENV)
+    if env_path and (Path(env_path) / "sam2").is_dir():
+        return env_path
+    cached = (
+        Path.home() / ".cache" / "vrautomatte"
+        / "sam2matting" / "SAM2Matting-main"
+    )
+    if (cached / "sam2").is_dir():
+        return str(cached)
+    return None
+
+
 @contextmanager
 def stock_sam2():
     """Make the stock ``sam2`` package importable in the block.
 
-    First-frame mask generation needs stock sam2 (automatic
-    mask generator + standard model configs). For the first
-    processor of a session this is a no-op; once the fork is
-    active (second SBS eye, later batch items) it must be
-    moved off sys.path and out of sys.modules for the
-    duration, then restored so the matting model still
-    resolves to the fork.
+    SAM2 mask generation (first-frame subjects, POV body)
+    needs stock sam2 — automatic mask generator + standard
+    model configs, neither of which the SAM2Matting fork
+    ships. Once the fork is active (any earlier SAM2Matting
+    processor in the session) it must be moved off sys.path
+    and out of sys.modules for the duration, then restored.
+    No-op when no fork exists on this machine.
     """
-    repo_str = str(ensure_repo())
-    removed = repo_str in sys.path
-    if removed:
-        sys.path.remove(repo_str)
+    repo_str = _fork_path_hint()
+    if repo_str is None or repo_str not in sys.path:
+        # Fork absent or never activated this session —
+        # stock sam2 resolves naturally.
+        yield
+        return
+    sys.path.remove(repo_str)
     loaded = [
         name for name in sys.modules
         if name == "sam2" or name.startswith("sam2.")
@@ -187,8 +204,7 @@ def stock_sam2():
         for name in stale:
             del sys.modules[name]
         gc.collect()
-        if removed:
-            sys.path.insert(0, repo_str)
+        sys.path.insert(0, repo_str)
 
 
 def _ensure_checkpoint(repo: Path, model_size: str) -> Path:
