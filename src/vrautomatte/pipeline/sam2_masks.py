@@ -51,10 +51,26 @@ def _score_pov_masks(
     total_px = h * w
     center_y, center_x = h / 2, w / 2
 
+    # Person-sized candidates only (1%-50% of the frame). A
+    # fisheye VR eye yields a giant "entire visible area"
+    # mask that sits dead-center and outscores the actual
+    # people — no real subject ever covers half the frame.
     candidates = [
-        m for m in masks if m["area"] > total_px * 0.01
+        m for m in masks
+        if 0.01 * total_px < m["area"] <= 0.50 * total_px
     ]
+    rejected = len(masks) - len(candidates)
+    if rejected:
+        logger.debug(
+            f"POV scoring: rejected {rejected} mask(s) "
+            "outside the 1%-50% subject size range"
+        )
     if not candidates:
+        logger.warning(
+            "POV scoring: no person-sized masks found — "
+            "falling back to all masks; subject selection "
+            "may be degenerate"
+        )
         candidates = masks
 
     scored = []
