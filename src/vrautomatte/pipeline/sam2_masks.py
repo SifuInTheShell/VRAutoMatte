@@ -532,6 +532,102 @@ def generate_person_masks(
     )
 
 
+def _run_sam2_prompted(
+    frame: np.ndarray,
+    device: torch.device | None = None,
+) -> tuple:
+    """Segment the centered subject with a point prompt.
+
+    Prompted segmentation is far more reliable than the
+    automatic mask generator for close-up subjects on fisheye
+    VR frames, where AMG often fragments the person into
+    clothing/limb pieces or misses them entirely. The prompt
+    sits slightly above frame center — where the subject is
+    by construction in VR POV content.
+
+    Returns:
+        (masks, scores) from SAM2ImagePredictor, or (None,
+        None) if sam2 is unavailable.
+    """
+    from vrautomatte.pipeline.sam2matting import stock_sam2
+
+    with stock_sam2():
+        try:
+            from sam2.sam2_image_predictor import (
+                SAM2ImagePredictor,
+            )
+        except ImportError:
+            return None, None
+
+        if device is None:
+            device = get_device()
+        variant = _SAM2_VARIANTS.get(
+            device.type, _SAM2_VARIANTS["cpu"]
+        )
+        logger.info(
+            f"Loading SAM2 ({variant}) for prompted "
+            f"subject segmentation..."
+        )
+        predictor = SAM2ImagePredictor.from_pretrained(
+            variant, device=str(device)
+        )
+        h, w = frame.shape[:2]
+        points = np.array([[w // 2, int(h * 0.45)]])
+        predictor.set_image(frame)
+        masks, scores, _ = predictor.predict(
+            point_coords=points,
+            point_labels=np.array([1]),
+            multimask_output=True,
+        )
+
+        del predictor
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        logger.debug("SAM2 unloaded, GPU memory freed")
+
+    return masks, scores
+
+
+def _select_prompted_subject(
+    frame: np.ndarray,
+    device: torch.device | None = None,
+) -> np.ndarray | None:
+    """Prompted subject mask, or None if implausible.
+
+    Picks the highest-scoring prompted mask whose area is
+    person-plausible (2%-60% of the frame). None means the
+    caller should fall back to AMG-based selection.
+    """
+    masks, scores = _run_sam2_prompted(frame, device)
+    if masks is None:
+        return None
+
+    h, w = frame.shape[:2]
+    total_px = h * w
+    best = None
+    for m, s in sorted(
+        zip(masks, scores), key=lambda x: -x[1]
+    ):
+        area_frac = m.sum() / total_px
+        if 0.02 <= area_frac <= 0.60 and s >= 0.5:
+            best = (m, s, area_frac)
+            break
+    if best is None:
+        logger.info(
+            "Prompted subject mask implausible — falling "
+            "back to automatic mask selection"
+        )
+        return None
+
+    m, s, area_frac = best
+    logger.info(
+        f"Prompted subject mask: score={s:.2f}, "
+        f"coverage={int(m.sum())}/{total_px}"
+    )
+    return m.astype(np.uint8) * 255
+
+
 def generate_first_frame_mask(
     frame: np.ndarray,
     device: torch.device | None = None,
@@ -539,8 +635,9 @@ def generate_first_frame_mask(
 ) -> np.ndarray:
     """Auto-generate a segmentation mask from frame 1.
 
-    Default: union of all person-shaped masks (handles
-    multiple close-up subjects). POV mode: non-POV person.
+    Primary: point-prompted segmentation of the centered
+    subject. Fallback: AMG mask scoring (union of person
+    masks, or the non-POV person in POV mode).
 
     Args:
         frame: RGB array (H, W, 3), uint8.
@@ -550,6 +647,10 @@ def generate_first_frame_mask(
     Returns:
         Binary mask (H, W), uint8 (0 or 255).
     """
+    prompted = _select_prompted_subject(frame, device)
+    if prompted is not None:
+        return prompted
+
     masks = _run_sam2_masks(frame, device)
 
     if pov_mode:
