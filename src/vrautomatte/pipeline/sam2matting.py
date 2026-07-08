@@ -332,6 +332,7 @@ class SAM2MattingProcessor:
                 )
             )
         logger.info("SAM2Matting loaded")
+        self._patch_alpha_head_devices()
 
         if isinstance(first_frame_mask, np.ndarray):
             self._next_masks = [first_frame_mask]
@@ -341,6 +342,43 @@ class SAM2MattingProcessor:
             logger.info(
                 f"Tracking {len(self._next_masks)} subjects"
             )
+
+    def _patch_alpha_head_devices(self) -> None:
+        """Work around a fork bug in the alpha-head path.
+
+        _run_single_frame_inference feeds the raw frame to the
+        alpha heads straight from inference_state['images'],
+        which lives on the storage device — CPU when the video
+        is offloaded — and crashes torch.cat inside
+        _detect_unknown_region. Wrap _forward_alpha_heads and
+        move its tensor inputs to the model device first.
+        """
+        torch = self._torch
+        predictor = self._predictor
+        orig = getattr(
+            predictor, "_forward_alpha_heads", None
+        )
+        if orig is None:
+            return  # upstream changed; nothing to patch
+        device = self._device
+
+        def to_dev(obj):
+            if torch.is_tensor(obj):
+                return obj.to(device, non_blocking=True)
+            if isinstance(obj, tuple):
+                return tuple(to_dev(o) for o in obj)
+            if isinstance(obj, list):
+                return [to_dev(o) for o in obj]
+            return obj
+
+        def wrapper(*args, **kwargs):
+            args = [to_dev(a) for a in args]
+            kwargs = {
+                k: to_dev(v) for k, v in kwargs.items()
+            }
+            return orig(*args, **kwargs)
+
+        predictor._forward_alpha_heads = wrapper
 
     # ── chunk-level API ─────────────────────────────────────
 
