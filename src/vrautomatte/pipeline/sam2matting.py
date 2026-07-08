@@ -40,6 +40,7 @@ import os
 import sys
 import urllib.request
 import zipfile
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
@@ -144,6 +145,50 @@ def prepare_environment() -> Path:
         sys.path.insert(0, repo_str)
         logger.debug(f"sys.path[0] = {repo_str}")
     return repo
+
+
+@contextmanager
+def stock_sam2():
+    """Make the stock ``sam2`` package importable in the block.
+
+    First-frame mask generation needs stock sam2 (automatic
+    mask generator + standard model configs). For the first
+    processor of a session this is a no-op; once the fork is
+    active (second SBS eye, later batch items) it must be
+    moved off sys.path and out of sys.modules for the
+    duration, then restored so the matting model still
+    resolves to the fork.
+    """
+    repo_str = str(ensure_repo())
+    removed = repo_str in sys.path
+    if removed:
+        sys.path.remove(repo_str)
+    loaded = [
+        name for name in sys.modules
+        if name == "sam2" or name.startswith("sam2.")
+    ]
+    for name in loaded:
+        del sys.modules[name]
+    if loaded:
+        gc.collect()
+        logger.debug(
+            f"stock_sam2: sidelined {len(loaded)} "
+            "sam2 modules"
+        )
+    try:
+        yield
+    finally:
+        # Drop whatever the block imported (stock modules);
+        # prepare_environment() reloads the fork afterwards.
+        stale = [
+            name for name in sys.modules
+            if name == "sam2" or name.startswith("sam2.")
+        ]
+        for name in stale:
+            del sys.modules[name]
+        gc.collect()
+        if removed:
+            sys.path.insert(0, repo_str)
 
 
 def _ensure_checkpoint(repo: Path, model_size: str) -> Path:

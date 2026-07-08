@@ -320,6 +320,7 @@ def create_processor(
         from vrautomatte.pipeline.sam2matting import (
             SAM2MattingProcessor,
             prepare_environment,
+            stock_sam2,
         )
 
         if first_frame is None:
@@ -337,26 +338,28 @@ def create_processor(
 
         # First-frame masks need the STOCK sam2 install — the
         # SAM2Matting fork ships neither the automatic mask
-        # generator nor the standard model configs. Generate
-        # them first; prepare_environment() below then purges
-        # the stock modules so the fork loads fresh.
-        if max_subjects > 1:
-            from vrautomatte.pipeline.sam2_masks import (
-                generate_person_masks,
-            )
-            masks = generate_person_masks(
-                first_frame, device,
-                max_people=max_subjects,
-                pov_mode=pov_mode,
-            )
-            logger.info(
-                f"SAM2Matting: tracking {len(masks)} "
-                f"subject(s) (requested {max_subjects})"
-            )
-        else:
-            masks = generate_first_frame_mask(
-                first_frame, device, pov_mode=pov_mode
-            )
+        # generator nor the standard model configs. stock_sam2()
+        # sidelines the fork (active for the 2nd SBS eye and
+        # later batch items); prepare_environment() below then
+        # reloads the fork for the matting model.
+        with stock_sam2():
+            if max_subjects > 1:
+                from vrautomatte.pipeline.sam2_masks import (
+                    generate_person_masks,
+                )
+                masks = generate_person_masks(
+                    first_frame, device,
+                    max_people=max_subjects,
+                    pov_mode=pov_mode,
+                )
+                logger.info(
+                    f"SAM2Matting: tracking {len(masks)} "
+                    f"subject(s) (requested {max_subjects})"
+                )
+            else:
+                masks = generate_first_frame_mask(
+                    first_frame, device, pov_mode=pov_mode
+                )
         prepare_environment()
         return SAM2MattingProcessor(
             first_frame_mask=masks,
