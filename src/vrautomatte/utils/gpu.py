@@ -103,6 +103,7 @@ def auto_configure_gpu() -> dict:
             "ma2_internal_size": 480,
             "ma2_mem_frames": 5,
             "downsample_ratio": 0.25,
+            "sbs_parallel_eyes": True,
         }
     elif vram_gb >= 15:
         cfg = {
@@ -110,6 +111,7 @@ def auto_configure_gpu() -> dict:
             "ma2_internal_size": 480,
             "ma2_mem_frames": 3,
             "downsample_ratio": 0.25,
+            "sbs_parallel_eyes": False,
         }
     elif vram_gb >= 11:
         cfg = {
@@ -117,6 +119,7 @@ def auto_configure_gpu() -> dict:
             "ma2_internal_size": 360,
             "ma2_mem_frames": 2,
             "downsample_ratio": 0.125,
+            "sbs_parallel_eyes": False,
         }
     elif vram_gb >= 7:
         cfg = {
@@ -124,6 +127,7 @@ def auto_configure_gpu() -> dict:
             "ma2_internal_size": 320,
             "ma2_mem_frames": 2,
             "downsample_ratio": 0.1,
+            "sbs_parallel_eyes": False,
         }
     else:
         cfg = {
@@ -131,6 +135,7 @@ def auto_configure_gpu() -> dict:
             "ma2_internal_size": 240,
             "ma2_mem_frames": 1,
             "downsample_ratio": 0.1,
+            "sbs_parallel_eyes": False,
         }
 
     logger.info(

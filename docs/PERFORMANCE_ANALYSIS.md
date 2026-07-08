@@ -226,14 +226,19 @@ These trade (imperceptible) quality for speed and can be UI toggles:
 | 3 | 2.3 chunk prefetch thread | ~40 lines | 1.2–1.5x | ✅ done (2026-07-07) |
 | 4 | 3.4 drop per-chunk `empty_cache`; alloc-conf in bootstrap | ~5 lines | 1.1–1.3x | ✅ done (2026-07-07) |
 | 5 | 2.4 rawvideo pipe pipeline (replaces 1–3) | ~200 lines | GPU-bound | ✅ done (2026-07-07) — `pipeline/framestream.py`; PNG path kept for SAM2Matting + `VRAUTOMATTE_NO_STREAM=1` escape hatch |
-| 6 | 3.1 batched/streamed eyes, 3.2 pinned transfers | moderate | 1.3–2x | open |
-| 7 | Tier 3 toggles (half-rate matting, res selector) | small | up to 2x | open |
+| 6 | 3.1 batched/streamed eyes, 3.2 pinned transfers | moderate | 1.3–2x | ✅ done (2026-07-08) — RVM mattes both SBS eyes in one batch-2 forward (shared model); optional threaded per-eye CUDA streams for MA2 (`sbs_parallel_eyes`, VRAM-heavy, auto-on ≥24 GB); pinned staging buffers + non-blocking H2D in RVM and MA2 |
+| 7 | Tier 3 toggles (half-rate matting, res selector) | small | up to 2x | ✅ done (2026-07-08) — `matte_stride` (matte every 2nd frame, alpha lerp for skipped ones, stream path) + "Matting Resolution" selector (Auto/1080p/720p/540p per eye) |
 | 8 | SAM2Matting variant (model-level speedup, see MODEL_RESEARCH_2026-07.md) | done | ~5–10x vs MA2 if claims hold | ✅ integrated (2026-07-07), needs on-GPU A/B |
+| 9 | ROI-restricted matting (`pipeline/roi.py`) — matte only a padded, sticky, 64px-quantized window around the tracked subject | ~250 lines | up to ~2–4x when subject is small in frame | ✅ done (2026-07-08) — default ON (`roi_matting`); full-frame fallback when subject lost/large; MA2 reseeds via previous matte on window moves, RVM resets recurrent state |
 
-Note: 3.3 (torch.compile default-on) was deliberately NOT flipped — the
-existing try/except only catches wrap-time errors, but Triton failures on
-Windows typically surface at the first forward pass, which would crash the
-pipeline mid-run. It stays opt-in until guarded by a warmup-frame test.
+Notes:
+- 3.3 torch.compile: now guarded at runtime — MatAnyone2 rebuilds without
+  compilation if the FIRST FORWARD PASS fails (the real Windows/Triton
+  failure mode). The config default stays off; flipping it on is now safe
+  to try per-run.
+- Remaining open item: none from the original analysis. Future candidates:
+  TensorRT export for RVM, NVDEC-resident (scale_cuda) decode, ROI for the
+  SAM2Matting chunk path.
 
 Steps 1–4 are low-risk, independent, and should take the pipeline from ~1 FPS
 to roughly **4–6 FPS** on the RTX 5080. Step 5 makes the pipeline GPU-bound

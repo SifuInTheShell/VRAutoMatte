@@ -373,6 +373,77 @@ class MainWindow(QMainWindow):
         row2.addStretch()
         settings_layout.addLayout(row2)
 
+        # Row 2b: Performance options
+        perf_row = QHBoxLayout()
+        self.roi_check = QCheckBox("ROI cropping")
+        self.roi_check.setChecked(True)
+        self.roi_check.setToolTip(
+            "Matte only a padded window around the tracked "
+            "person instead of the full frame.\n"
+            "Big speedup when the subject fills a fraction "
+            "of the frame (typical for VR passthrough).\n"
+            "Falls back to full-frame automatically if the "
+            "subject is lost or fills the frame.\n"
+            "Not used by SAM2Matting (it tracks internally)."
+        )
+        perf_row.addWidget(self.roi_check)
+        perf_row.addSpacing(20)
+
+        rate_label = QLabel("Matting Rate:")
+        rate_label.setToolTip(
+            "How many frames the AI mattes.\n\n"
+            "• Every frame — Best quality.\n"
+            "• Every 2nd frame — ~2x faster; skipped "
+            "frames get interpolated alpha. Visually "
+            "identical on 60fps content in most cases.\n\n"
+            "Applies to RVM / MatAnyone 2 (stream path)."
+        )
+        perf_row.addWidget(rate_label)
+        self.rate_combo = QComboBox()
+        self.rate_combo.addItems([
+            "Every frame (best)",
+            "Every 2nd frame (~2x faster)",
+        ])
+        self.rate_combo.setToolTip(rate_label.toolTip())
+        perf_row.addWidget(self.rate_combo)
+        perf_row.addSpacing(20)
+
+        res_label = QLabel("Matting Resolution:")
+        res_label.setToolTip(
+            "Resolution the AI mattes at (per eye for SBS). "
+            "Inference cost scales with pixels.\n\n"
+            "• Auto — Chosen from GPU VRAM (default)\n"
+            "• High — 1920x1080 per eye\n"
+            "• Medium — 1280x720 per eye (~2x faster than "
+            "High)\n"
+            "• Low — 960x540 per eye (fastest)\n\n"
+            "For passthrough silhouettes at VR viewing "
+            "distance, Medium usually looks identical."
+        )
+        perf_row.addWidget(res_label)
+        self.res_combo = QComboBox()
+        self.res_combo.addItems([
+            "Auto (GPU)", "High (1080p)",
+            "Medium (720p)", "Low (540p)",
+        ])
+        self.res_combo.setToolTip(res_label.toolTip())
+        perf_row.addWidget(self.res_combo)
+        perf_row.addSpacing(20)
+
+        self.parallel_eyes_check = QCheckBox(
+            "Parallel eyes"
+        )
+        self.parallel_eyes_check.setToolTip(
+            "Process both SBS eyes concurrently (only for "
+            "MatAnyone 2, which needs one model per eye).\n"
+            "Roughly doubles peak VRAM — enable only with "
+            "24 GB+ GPUs. RVM batches both eyes in one "
+            "pass automatically instead."
+        )
+        perf_row.addWidget(self.parallel_eyes_check)
+        perf_row.addStretch()
+        settings_layout.addLayout(perf_row)
+
         # Row 3: VR-specific (conditional)
         self.vr_row_widget = QWidget()
         vr_row = QHBoxLayout(self.vr_row_widget)
@@ -715,6 +786,18 @@ class MainWindow(QMainWindow):
         self.resume_check.setChecked(
             s.get("auto_resume", True)
         )
+        self.roi_check.setChecked(
+            s.get("roi_matting", True)
+        )
+        self.rate_combo.setCurrentIndex(
+            s.get("matte_rate", 0)
+        )
+        self.res_combo.setCurrentIndex(
+            s.get("matting_res", 0)
+        )
+        self.parallel_eyes_check.setChecked(
+            s.get("parallel_eyes", False)
+        )
         self.preview_check.setChecked(
             s.get("preview_enabled", True)
         )
@@ -740,6 +823,12 @@ class MainWindow(QMainWindow):
             "temporal_smoothing": self.smooth_combo.currentIndex(),
             "chunk_size": self.chunk_size_combo.currentIndex(),
             "auto_resume": self.resume_check.isChecked(),
+            "roi_matting": self.roi_check.isChecked(),
+            "matte_rate": self.rate_combo.currentIndex(),
+            "matting_res": self.res_combo.currentIndex(),
+            "parallel_eyes": (
+                self.parallel_eyes_check.isChecked()
+            ),
             "preview_enabled": self.preview_check.isChecked(),
             "window_width": self.width(),
             "window_height": self.height(),
@@ -1211,6 +1300,14 @@ class MainWindow(QMainWindow):
 
         smooth_map = {0: 1.0, 1: 0.85, 2: 0.7, 3: 0.5}
         chunk_map = {0: 100, 1: 250, 2: 500, 3: 1000}
+        rate_map = {0: 1, 1: 2}
+        # Per-eye matting pixel budgets; 0 = GPU auto-config.
+        res_map = {
+            0: 0,
+            1: 1920 * 1080,
+            2: 1280 * 720,
+            3: 960 * 540,
+        }
 
         config = PipelineConfig(
             input_path=input_path or self.input_edit.text(),
@@ -1232,6 +1329,16 @@ class MainWindow(QMainWindow):
                 self.chunk_size_combo.currentIndex(), 500
             ),
             auto_resume=self.resume_check.isChecked(),
+            roi_matting=self.roi_check.isChecked(),
+            matte_stride=rate_map.get(
+                self.rate_combo.currentIndex(), 1
+            ),
+            max_matting_pixels=res_map.get(
+                self.res_combo.currentIndex(), 0
+            ),
+            sbs_parallel_eyes=(
+                self.parallel_eyes_check.isChecked()
+            ),
         )
 
         # Frame range

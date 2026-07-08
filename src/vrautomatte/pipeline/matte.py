@@ -70,29 +70,51 @@ class AlphaSmoother:
         self._inner = inner
         self._weight = weight
         self._prev: np.ndarray | None = None
+        self._prev_r: np.ndarray | None = None
+
+    @property
+    def supports_pair(self) -> bool:
+        """Pair mode available iff the inner processor has it."""
+        return getattr(self._inner, "supports_pair", False)
+
+    def _blend(self, matte, prev):
+        if prev is None:
+            return matte
+        blended = (
+            self._weight * matte.astype(np.float32)
+            + (1.0 - self._weight)
+            * prev.astype(np.float32)
+        )
+        return blended.clip(0, 255).astype(np.uint8)
 
     def process_frame(self, frame: np.ndarray) -> np.ndarray:
         """Process frame and blend with previous matte."""
-        matte = self._inner.process_frame(frame)
-        if self._prev is not None:
-            blended = (
-                self._weight * matte.astype(np.float32)
-                + (1.0 - self._weight)
-                * self._prev.astype(np.float32)
-            )
-            matte = blended.clip(0, 255).astype(np.uint8)
+        matte = self._blend(
+            self._inner.process_frame(frame), self._prev
+        )
         self._prev = matte.copy()
         return matte
+
+    def process_frame_pair(self, left, right):
+        """Pair processing with per-eye smoothing state."""
+        lm, rm = self._inner.process_frame_pair(left, right)
+        lm = self._blend(lm, self._prev)
+        rm = self._blend(rm, self._prev_r)
+        self._prev = lm.copy()
+        self._prev_r = rm.copy()
+        return lm, rm
 
     def reset(self) -> None:
         """Reset inner processor and smoothing state."""
         self._inner.reset()
         self._prev = None
+        self._prev_r = None
 
     def cleanup(self) -> None:
         """Release inner processor resources."""
         self._inner.cleanup()
         self._prev = None
+        self._prev_r = None
 
 
 class POVExclusionProcessor:
@@ -193,6 +215,7 @@ def create_processor(
     max_mem_frames: int = 3,
     use_long_term: bool = True,
     compile_model: bool = False,
+    roi_matting: bool = False,
 ) -> MatteProcessor:
     """Create a matting processor for the given variant.
 
@@ -223,6 +246,14 @@ def create_processor(
             device=device,
             use_fp16=use_fp16,
         )
+
+        if roi_matting:
+            # ROI wraps the raw model; POV exclusion (below)
+            # stays outside so its full-frame mask geometry is
+            # applied to the pasted-back full-size matte.
+            from vrautomatte.pipeline.roi import ROICropper
+            logger.info("ROI cropping enabled")
+            processor = ROICropper(processor)
 
         if pov_mode and first_frame is not None:
             from vrautomatte.pipeline.sam2_masks import (
@@ -299,7 +330,7 @@ def create_processor(
         mask = generate_first_frame_mask(
             first_frame, device, pov_mode=pov_mode
         )
-        return MatAnyone2Processor(
+        processor = MatAnyone2Processor(
             first_frame_mask=mask,
             device=device,
             pov_mode=pov_mode,
@@ -309,6 +340,14 @@ def create_processor(
             use_long_term=use_long_term,
             compile_model=compile_model,
         )
+        if roi_matting:
+            from vrautomatte.pipeline.roi import ROICropper
+            logger.info(
+                "ROI cropping enabled (MatAnyone 2 reseeds "
+                "on window moves)"
+            )
+            processor = ROICropper(processor)
+        return processor
 
     raise ValueError(
         f"Unknown variant '{variant}'. Use: {VARIANTS}"

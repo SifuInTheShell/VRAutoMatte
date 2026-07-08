@@ -173,7 +173,41 @@ class MatAnyone2Processor:
         self._processor = InferenceCore(
             model, cfg=cfg, device=str(device)
         )
+        self._pinned = None
+        self._compiled = compile_model and device.type == "cuda"
+        self._uncompiled_model = None
+        if self._compiled:
+            # Keep a handle for the runtime fallback: compiled
+            # models often fail at the FIRST FORWARD PASS (Triton
+            # backend issues on Windows), not at wrap time.
+            self._uncompiled_model = model
+            self._compile_cfg = (
+                max_mem_frames, use_long_term,
+            )
         logger.info("MatAnyone 2 loaded")
+
+    def _compile_fallback(self, exc: Exception):
+        """Rebuild the InferenceCore without torch.compile.
+
+        Called when the first compiled forward pass fails —
+        the common torch.compile failure mode on Windows.
+        """
+        logger.warning(
+            f"torch.compile failed at first forward pass "
+            f"({exc}); rebuilding without compilation"
+        )
+        model = self._uncompiled_model
+        # torch.compile wraps — the original module is intact.
+        orig = getattr(model, "_orig_mod", model)
+        max_mem_frames, use_long_term = self._compile_cfg
+        cfg = orig.cfg
+        cfg.max_mem_frames = max_mem_frames
+        cfg.use_long_term = use_long_term
+        from matanyone2 import InferenceCore
+        self._processor = InferenceCore(
+            orig, cfg=cfg, device=str(self.device)
+        )
+        self._compiled = False
 
     # ── internal helpers ─────────────────────────────────────────────
 
@@ -181,16 +215,29 @@ class MatAnyone2Processor:
         """Convert uint8 HWC numpy frame to CHW float tensor on device.
 
         Applies FP16 cast and channels-last layout when enabled.
+        On CUDA the frame is staged through a persistent pinned
+        buffer so the host-to-device copy is async instead of a
+        pageable-memory sync stall.
         """
-        t = (
-            torch.from_numpy(frame)
-            .float()
-            .permute(2, 0, 1)
-            .div(255.0)
-        )
+        cpu_t = torch.from_numpy(frame)  # H, W, C uint8
+        if self.device.type == "cuda":
+            if (
+                self._pinned is None
+                or self._pinned.shape != cpu_t.shape
+            ):
+                self._pinned = torch.empty_like(
+                    cpu_t, pin_memory=True
+                )
+            self._pinned.copy_(cpu_t)
+            gpu = self._pinned.to(
+                self.device, non_blocking=True
+            )
+        else:
+            gpu = cpu_t.to(self.device)
+
+        t = gpu.permute(2, 0, 1).float().div(255.0)
         if self._use_fp16:
             t = t.half()
-        t = t.to(self.device)
         if self.device.type == "cuda":
             # channels_last requires 4-D input
             t = (
@@ -235,7 +282,23 @@ class MatAnyone2Processor:
     def _process_first_frame(
         self, frame: np.ndarray
     ) -> np.ndarray:
-        """Run the two-step first-frame initialization."""
+        """Run the two-step first-frame initialization.
+
+        The first forward pass is where torch.compile failures
+        surface — if it throws while compiled, rebuild without
+        compilation and retry once.
+        """
+        try:
+            return self._first_frame_steps(frame)
+        except Exception as exc:  # noqa: BLE001
+            if not self._compiled:
+                raise
+            self._compile_fallback(exc)
+            return self._first_frame_steps(frame)
+
+    def _first_frame_steps(
+        self, frame: np.ndarray
+    ) -> np.ndarray:
         img_tensor = self._to_tensor(frame)
 
         with torch.no_grad(), self._autocast():
@@ -308,6 +371,24 @@ class MatAnyone2Processor:
             output = self._processor.step(img_tensor)
 
         return self._extract_matte(output)
+
+    def reseed(
+        self, frame: np.ndarray, mask: np.ndarray
+    ) -> np.ndarray:
+        """Re-initialize memory with a new mask and matte frame.
+
+        Used by ROI cropping when the crop window moves — the
+        previous matte (cropped to the new window) becomes the
+        new first-frame mask, preserving subject identity.
+
+        Args:
+            frame: RGB (H, W, 3) uint8 at the new window size.
+            mask: Binary subject mask (H, W) for that frame.
+
+        Returns:
+            Alpha matte for the frame.
+        """
+        return self._reinit_with_mask(frame, mask)
 
     def reset(self) -> None:
         """Reset state for a new video."""

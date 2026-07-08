@@ -12,6 +12,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -109,6 +110,19 @@ class PipelineConfig:
     # EMA weight for alpha smoothing (1.0 = off).
     temporal_smoothing: float = 1.0
 
+    # ── Performance options ─────────────────────────────────────
+    # Matte only a padded window around the tracked subject
+    # (pipeline/roi.py). Big win when the person fills a
+    # fraction of the frame, as in VR passthrough.
+    roi_matting: bool = True
+    # Matte every Nth frame and interpolate alpha in between
+    # (stream path only). 1 = every frame, 2 = half-rate (~2x).
+    matte_stride: int = 1
+    # Run the two SBS eye models concurrently (only applies when
+    # eyes can't share one batched model, i.e. MatAnyone2).
+    # Roughly doubles peak VRAM — auto-enabled on >=24 GB GPUs.
+    sbs_parallel_eyes: bool = False
+
     # ── Disk management ───────────────────────────────────────
     chunk_size: int = 500
 
@@ -155,6 +169,7 @@ class Pipeline:
         self._cancelled = False
         self._start_time = 0.0
         self._matte_start_time = 0.0
+        self._eye_pool = None
 
     def cancel(self) -> None:
         """Request cancellation of the running pipeline."""
@@ -381,6 +396,13 @@ class Pipeline:
         if config.downsample_ratio == defaults.downsample_ratio:
             config.downsample_ratio = (
                 gpu_cfg["downsample_ratio"]
+            )
+        if (
+            config.sbs_parallel_eyes
+            == defaults.sbs_parallel_eyes
+        ):
+            config.sbs_parallel_eyes = gpu_cfg.get(
+                "sbs_parallel_eyes", False
             )
         return gpu_cfg
 
@@ -823,6 +845,9 @@ class Pipeline:
             return output_path
 
         finally:
+            if self._eye_pool is not None:
+                self._eye_pool.shutdown(wait=True)
+                self._eye_pool = None
             logger.remove(log_id)
             # Copy log next to output before cleanup
             if completed and log_path.exists():
@@ -1083,6 +1108,9 @@ class Pipeline:
                         if use_sbs:
                             matte_arr = self._process_sbs_frame(
                                 frame_arr, proc_l, proc_r,
+                                parallel=(
+                                    config.sbs_parallel_eyes
+                                ),
                             )
                         else:
                             matte_arr = processor.process_frame(
@@ -1171,6 +1199,18 @@ class Pipeline:
         self._proc_l = self._make_processor(
             config, left_seed
         )
+
+        if getattr(self._proc_l, "supports_pair", False):
+            # RVM-family: one shared model mattes both eyes in
+            # a single batched forward pass (half the calls,
+            # half the model VRAM).
+            logger.info(
+                "SBS: batched two-eye processing "
+                "(single shared model)"
+            )
+            self._proc_r = self._proc_l
+            return
+
         logger.info(
             "SBS: initialising right-eye processor..."
         )
@@ -1392,44 +1432,28 @@ class Pipeline:
                 if use_sbs else "Generating mattes"
             )
 
-            while frame is not None:
-                if self._cancelled:
-                    raise InterruptedError(
-                        "Pipeline cancelled by user"
-                    )
-                if (
-                    global_frame_idx % _DISK_CHECK_INTERVAL
-                    == 0
-                ):
-                    self._check_disk_free(segments_dir)
-
-                if use_sbs:
-                    matte_arr = self._process_sbs_frame(
-                        frame, proc_l, proc_r,
-                    )
-                else:
-                    matte_arr = processor.process_frame(
-                        frame
-                    )
-
+            def emit_matte(matte, src_frame):
+                """Write one matte, cutting segments and
+                checkpointing every chunk_size frames."""
+                nonlocal writer, seg_frames
+                nonlocal seg_idx, global_frame_idx
                 if writer is None:
                     writer = SegmentStreamWriter(
                         segments_dir
                         / f"segment_{seg_idx:06d}.mp4",
-                        (out_w, out_h), fps_str, config.crf,
+                        (out_w, out_h),
+                        fps_str, config.crf,
                     )
-                writer.write(matte_arr)
+                writer.write(matte)
                 seg_frames += 1
                 global_frame_idx += 1
-
                 self._emit_matte_progress(
                     global_frame_idx - 1,
                     num_to_process,
-                    frame, matte_arr,
+                    src_frame, matte,
                     stage=stage,
                     estimated_disk_gb=estimated_disk_gb,
                 )
-
                 if seg_frames >= config.chunk_size:
                     writer.close()
                     writer = None
@@ -1441,7 +1465,68 @@ class Pipeline:
                         global_frame_idx, segments_dir,
                     )
 
+            # Half-rate matting: matte every Nth frame and
+            # linearly interpolate the alpha in between. The
+            # matte is temporally smooth, so lerp is visually
+            # equivalent at stride 2 for 60fps content.
+            stride = max(1, int(config.matte_stride))
+            if stride > 1:
+                logger.info(
+                    f"Half-rate matting: every {stride}. "
+                    f"frame matted, alpha interpolated"
+                )
+            last_matte = None
+            deferred = 0
+            frame_no = 0  # index within this run
+
+            while frame is not None:
+                if self._cancelled:
+                    raise InterruptedError(
+                        "Pipeline cancelled by user"
+                    )
+                if frame_no % _DISK_CHECK_INTERVAL == 0:
+                    self._check_disk_free(segments_dir)
+
+                do_matte = (
+                    stride == 1
+                    or last_matte is None
+                    or frame_no % stride == 0
+                )
+
+                if do_matte:
+                    if use_sbs:
+                        matte_arr = self._process_sbs_frame(
+                            frame, proc_l, proc_r,
+                            parallel=config.sbs_parallel_eyes,
+                        )
+                    else:
+                        matte_arr = (
+                            processor.process_frame(frame)
+                        )
+
+                    if deferred:
+                        lastf = last_matte.astype(np.float32)
+                        curf = matte_arr.astype(np.float32)
+                        for k in range(1, deferred + 1):
+                            w = k / (deferred + 1)
+                            interp = (
+                                (1.0 - w) * lastf + w * curf
+                            ).astype(np.uint8)
+                            emit_matte(interp, None)
+                        deferred = 0
+
+                    emit_matte(matte_arr, frame)
+                    last_matte = matte_arr
+                else:
+                    deferred += 1
+
+                frame_no += 1
                 frame = reader.read()
+
+            # Trailing skipped frames at EOF: repeat the last
+            # matte so every source frame has one.
+            for _ in range(deferred):
+                emit_matte(last_matte, None)
 
             # Final partial segment
             if writer is not None:
@@ -1472,21 +1557,74 @@ class Pipeline:
             elif processor is not None:
                 processor.cleanup()
 
-    @staticmethod
-    def _process_sbs_frame(frame_arr, proc_l, proc_r):
+    _eye_streams = threading.local()
+
+    def _process_sbs_frame(
+        self, frame_arr, proc_l, proc_r, parallel=False,
+    ):
         """Process one SBS frame through both eye processors.
 
         The frame is already at matting resolution — no per-eye
-        scaling is needed.
+        scaling is needed. Three strategies, fastest first:
+        - shared pair-capable processor (RVM): one batched
+          forward pass for both eyes
+        - ``parallel``: both eyes concurrently on worker threads
+          with per-thread CUDA streams (two-instance models,
+          i.e. MatAnyone2 — needs the VRAM headroom)
+        - sequential fallback
         """
         left, right = split_frame(frame_arr)
 
-        left_m = proc_l.process_frame(left)
-        right_m = proc_r.process_frame(right)
+        if proc_l is proc_r and getattr(
+            proc_l, "supports_pair", False
+        ):
+            left_m, right_m = proc_l.process_frame_pair(
+                left, right
+            )
+        elif parallel and proc_l is not proc_r:
+            if self._eye_pool is None:
+                self._eye_pool = ThreadPoolExecutor(
+                    max_workers=2,
+                    thread_name_prefix="eye",
+                )
+            f_l = self._eye_pool.submit(
+                self._run_eye, proc_l, left
+            )
+            f_r = self._eye_pool.submit(
+                self._run_eye, proc_r, right
+            )
+            left_m = f_l.result()
+            right_m = f_r.result()
+        else:
+            left_m = proc_l.process_frame(left)
+            right_m = proc_r.process_frame(right)
 
         matte = merge_mattes(left_m, right_m)
         del left, right, left_m, right_m
         return matte
+
+    @classmethod
+    def _run_eye(cls, proc, eye):
+        """Run one eye on this worker thread's CUDA stream.
+
+        Streams let the two eyes' GPU work overlap; the matte
+        returns as numpy (the D2H copy synchronizes), so no
+        cross-stream tensor sharing occurs.
+        """
+        try:
+            import torch
+            if torch.cuda.is_available():
+                stream = getattr(
+                    cls._eye_streams, "stream", None
+                )
+                if stream is None:
+                    stream = torch.cuda.Stream()
+                    cls._eye_streams.stream = stream
+                with torch.cuda.stream(stream):
+                    return proc.process_frame(eye)
+        except ImportError:
+            pass
+        return proc.process_frame(eye)
 
     # ── Processor creation ───────────────────────────────────
 
@@ -1522,6 +1660,7 @@ class Pipeline:
             max_mem_frames=config.ma2_mem_frames,
             use_long_term=config.ma2_use_long_term,
             compile_model=config.ma2_compile_model,
+            roi_matting=config.roi_matting,
         )
 
         if config.temporal_smoothing < 1.0:

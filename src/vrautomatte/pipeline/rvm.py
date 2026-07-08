@@ -157,10 +157,47 @@ class RVMProcessor:
         self.downsample_ratio = downsample_ratio
         self.rec = [None] * 4
         self.variant = variant
+        # Pinned staging buffer for async H2D transfers (CUDA).
+        self._pinned: torch.Tensor | None = None
+
+    # Both SBS eyes can share one forward pass (batch=2) — the
+    # recurrent states carry a batch dimension.
+    supports_pair = True
 
     def reset(self) -> None:
         """Reset recurrent state (call between videos)."""
         self.rec = [None] * 4
+
+    def _to_device(self, arr: np.ndarray) -> torch.Tensor:
+        """uint8 NHWC batch -> float NCHW tensor on device.
+
+        Uses a persistent pinned staging buffer on CUDA so the
+        host-to-device copy is async (non_blocking) instead of a
+        pageable-memory sync stall on every frame.
+        """
+        cpu_t = torch.from_numpy(arr)  # N, H, W, C uint8
+        if self.device.type == "cuda":
+            if (
+                self._pinned is None
+                or self._pinned.shape != cpu_t.shape
+            ):
+                self._pinned = torch.empty_like(
+                    cpu_t, pin_memory=True
+                )
+            self._pinned.copy_(cpu_t)
+            gpu = self._pinned.to(
+                self.device, non_blocking=True
+            )
+        else:
+            gpu = cpu_t.to(self.device)
+        return (
+            gpu.permute(0, 3, 1, 2)
+            .to(
+                dtype=torch.float16
+                if self._use_fp16 else torch.float32
+            )
+            .div(255.0)
+        )
 
     def process_frame(self, frame: np.ndarray) -> np.ndarray:
         """Process a single frame and return alpha matte.
@@ -171,17 +208,7 @@ class RVMProcessor:
         Returns:
             Alpha matte (H, W), uint8 (0-255).
         """
-        # Direct numpy → tensor conversion, bypassing the PIL round-trip
-        # (Image.fromarray → to_tensor) that was in the previous version.
-        # frame is already uint8 RGB; we normalise to [0, 1] float in one op.
-        src = (
-            torch.from_numpy(frame)
-            .permute(2, 0, 1)          # HWC → CHW
-            .unsqueeze(0)              # add batch dim → [1, C, H, W]
-            .to(dtype=torch.float16 if self._use_fp16 else torch.float32,
-                device=self.device)
-            .div(255.0)
-        )
+        src = self._to_device(frame[None])  # [1, C, H, W]
 
         with torch.no_grad():
             fgr, pha, *self.rec = self.model(
@@ -189,6 +216,31 @@ class RVMProcessor:
             )
 
         return (pha[0, 0] * 255).byte().cpu().numpy()
+
+    def process_frame_pair(
+        self, left: np.ndarray, right: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Matte both SBS eyes in one batched forward pass.
+
+        Roughly halves per-frame model overhead vs two calls;
+        per-eye recurrent state is carried in the batch dim.
+
+        Args:
+            left, right: RGB (H, W, 3) uint8, equal shapes.
+
+        Returns:
+            (left_matte, right_matte), each (H, W) uint8.
+        """
+        batch = np.stack([left, right])  # [2, H, W, C]
+        src = self._to_device(batch)
+
+        with torch.no_grad():
+            fgr, pha, *self.rec = self.model(
+                src, *self.rec, self.downsample_ratio
+            )
+
+        mattes = (pha[:, 0] * 255).byte().cpu().numpy()
+        return mattes[0], mattes[1]
 
     def cleanup(self) -> None:
         """Release model and GPU memory."""
