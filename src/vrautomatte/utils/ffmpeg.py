@@ -43,18 +43,25 @@ def _detect_nvenc() -> dict:
     return result
 
 
-def _encode_args(codec: str, crf: int) -> list:
+def _encode_args(
+    codec: str, crf: int, preset: str | None = None,
+) -> list:
     """Return ffmpeg encoding args, preferring NVENC when available.
 
     Falls back to CPU ``libx265`` / ``libx264`` if NVENC is not
     detected.
+
+    Args:
+        preset: NVENC preset override (p1 fastest .. p7 best).
+            None = p4 (balanced). Ignored on the CPU fallback.
     """
     nvenc = _detect_nvenc()
+    p = preset or "p4"
 
     if codec == "libsvtav1" and nvenc["av1"]:
         return [
             "-c:v", "av1_nvenc",
-            "-preset", "p4",
+            "-preset", p,
             "-rc", "vbr",
             "-cq", str(crf + 5),
             "-b:v", "0",
@@ -62,7 +69,7 @@ def _encode_args(codec: str, crf: int) -> list:
     if codec == "libx265" and nvenc["hevc"]:
         return [
             "-c:v", "hevc_nvenc",
-            "-preset", "p4",
+            "-preset", p,
             "-rc", "vbr",
             "-cq", str(crf + 3),
             "-b:v", "0",
@@ -70,7 +77,7 @@ def _encode_args(codec: str, crf: int) -> list:
     if codec == "libx264" and nvenc["h264"]:
         return [
             "-c:v", "h264_nvenc",
-            "-preset", "p4",
+            "-preset", p,
             "-rc", "vbr",
             "-cq", str(crf + 2),
             "-b:v", "0",
@@ -155,6 +162,7 @@ def _run_ffmpeg_logged(
     cmd: list,
     label: str,
     total_frames: int = 0,
+    cancel_check=None,
 ) -> None:
     """Run an ffmpeg command with progress logging.
 
@@ -168,6 +176,10 @@ def _run_ffmpeg_logged(
             to add ``-progress pipe:1``).
         label: Human-readable label for log messages.
         total_frames: If known, used for percentage display.
+        cancel_check: Optional callable polled ~2x/second by a
+            watcher thread; returning True terminates ffmpeg
+            (used by background assembly so a pipeline cancel
+            doesn't wait out a long chapter encode).
     """
     # Inject -progress before the output path (last arg)
     run_cmd = cmd[:-1] + ["-progress", "pipe:1"] + cmd[-1:]
@@ -183,6 +195,26 @@ def _run_ffmpeg_logged(
         stderr=subprocess.DEVNULL,
         text=True,
     )
+
+    cancelled = False
+    if cancel_check is not None:
+        import threading as _threading
+
+        def _watch():
+            nonlocal cancelled
+            while proc.poll() is None:
+                if cancel_check():
+                    cancelled = True
+                    try:
+                        proc.terminate()
+                    except OSError:
+                        pass
+                    return
+                time.sleep(0.5)
+
+        _threading.Thread(
+            target=_watch, daemon=True
+        ).start()
 
     last_log = t0
     last_frame = 0
@@ -217,6 +249,10 @@ def _run_ffmpeg_logged(
 
     elapsed = time.monotonic() - t0
     if proc.returncode != 0:
+        if cancelled:
+            raise InterruptedError(
+                f"[{label}] cancelled"
+            )
         # If an NVENC encoder was used, retry with CPU fallback
         _NVENC_CODECS = {
             "hevc_nvenc": "libx265",
@@ -251,7 +287,8 @@ def _run_ffmpeg_logged(
                 else:
                     cpu_cmd.append(tok)
             _run_ffmpeg_logged(
-                cpu_cmd, f"{label}-cpu", total_frames
+                cpu_cmd, f"{label}-cpu", total_frames,
+                cancel_check=cancel_check,
             )
             return
 
@@ -691,7 +728,11 @@ def assemble_deovr(
     dur_sec: float | None = None,
     codec: str = "libsvtav1",
     crf: int = 18,
+    preset: str | None = None,
     total_frames: int = 0,
+    include_audio: bool = True,
+    cancel_check=None,
+    label: str = "deovr-fused",
 ) -> None:
     """Fused single-pass DeoVR assembly.
 
@@ -757,6 +798,9 @@ def assemble_deovr(
     parts += _alpha_pack_graph_parts(W, H, "[vid]", "[mat]")
     filter_complex = ";".join(parts)
 
+    audio_maps = (
+        ["-map", "0:a?"] if include_audio else ["-an"]
+    )
     cmd = [
         "ffmpeg", "-y",
         *_hwaccel_args(),
@@ -768,12 +812,13 @@ def assemble_deovr(
             if use_mask else []
         ),
         "-filter_complex", filter_complex,
-        "-map", "[out]", "-map", "0:a?",
+        "-map", "[out]", *audio_maps,
         *(
             ["-t", f"{dur_sec:.4f}"]
             if dur_sec is not None else []
         ),
-        *_encode_args(codec, crf), "-c:a", "copy",
+        *_encode_args(codec, crf, preset),
+        *(["-c:a", "copy"] if include_audio else []),
         str(output_path),
     ]
     logger.info(
@@ -785,7 +830,8 @@ def assemble_deovr(
         + ")"
     )
     _run_ffmpeg_logged(
-        cmd, "deovr-fused", total_frames=total_frames
+        cmd, label, total_frames=total_frames,
+        cancel_check=cancel_check,
     )
 
 

@@ -157,6 +157,10 @@ class PipelineConfig:
     # is a separate SAM2 object). RVM mattes everyone natively;
     # MatAnyone2 tracks one subject (union mask for several).
     max_subjects: int = 1
+    # NVENC preset for the final DeoVR encode (p1 fastest ..
+    # p7 best quality). p2 is ~1.5-2x faster than p4 with
+    # negligible quality difference at these settings.
+    encode_preset: str = "p2"
 
     # ── Disk management ───────────────────────────────────────
     chunk_size: int = 500
@@ -205,6 +209,7 @@ class Pipeline:
         self._start_time = 0.0
         self._matte_start_time = 0.0
         self._eye_pool = None
+        self._assembler = None
 
     def cancel(self) -> None:
         """Request cancellation of the running pipeline."""
@@ -639,6 +644,60 @@ class Pipeline:
                 f"Estimated temp space: {est_gb:.1f} GB"
             )
 
+            # ── Background assembly (DeoVR only) ──
+            # Chapters of the final output are assembled by a
+            # background worker WHILE matting runs: matting
+            # saturates the CUDA cores, assembly uses NVDEC +
+            # CPU filters + NVENC — different engines, so the
+            # assembly hour hides behind the matting time.
+            # VRAUTOMATTE_NO_BG_ASSEMBLY=1 falls back to the
+            # single fused pass after matting;
+            # VRAUTOMATTE_NO_FUSED_ASSEMBLY=1 to the legacy
+            # multi-pass chain.
+            self._assembler = None
+            use_fused = (
+                os.environ.get(
+                    "VRAUTOMATTE_NO_FUSED_ASSEMBLY"
+                ) != "1"
+            )
+            use_bg = use_fused and (
+                os.environ.get(
+                    "VRAUTOMATTE_NO_BG_ASSEMBLY"
+                ) != "1"
+            )
+            if (
+                config.output_format
+                == OutputFormat.DEOVR_ALPHA
+                and use_bg
+            ):
+                from vrautomatte.pipeline.assembly import (
+                    ChapteredAssembler,
+                )
+                start_0 = 0
+                if config.start_frame > 0:
+                    start_0 = config.start_frame - 1
+                self._assembler = ChapteredAssembler(
+                    input_path, segments_dir,
+                    tmp / "assembly",
+                    is_equirect=(
+                        config.projection
+                        == ProjectionType.EQUIRECTANGULAR
+                    ),
+                    fov=config.fisheye_fov,
+                    mask_path=(
+                        config.fisheye_mask_path or None
+                    ),
+                    fps=float(info["fps"]),
+                    start_frame_0based=start_0,
+                    crf=config.crf,
+                    preset=config.encode_preset,
+                    chunk_size=config.chunk_size,
+                    chapter_frames=int(os.environ.get(
+                        "VRAUTOMATTE_CHAPTER_FRAMES", "6000"
+                    )),
+                    cancel_check=lambda: self._cancelled,
+                )
+
             # ── Stages 1+2: Chunked extract + matte ──
             total_stages = self._total_stages()
             self._matte_start_time = time.monotonic()
@@ -676,6 +735,39 @@ class Pipeline:
                     cfg_hash=cfg_hash,
                     estimated_disk_gb=est_gb,
                 )
+
+            # ── Chaptered assembly: finalize and exit ──
+            # Most chapters already assembled in the background
+            # during matting; only the tail + concat + audio mux
+            # remain.
+            if self._assembler is not None:
+                logger.info(
+                    "Stage 3-5: Finalizing chaptered "
+                    "assembly..."
+                )
+                self._emit(PipelineProgress(
+                    stage="Finalizing assembled chapters",
+                    stage_num=4,
+                    total_stages=total_stages,
+                ))
+                n_segments = len(
+                    sorted(segments_dir.glob("segment_*.mp4"))
+                )
+                self._assembler.finalize(
+                    n_segments, output_path,
+                    total_frames=num_to_process,
+                )
+                self._assembler = None
+                logger.info(
+                    f"Done! Alpha-packed video: {output_path}"
+                )
+                self._emit(PipelineProgress(
+                    stage="Complete",
+                    stage_num=total_stages,
+                    total_stages=total_stages,
+                ))
+                completed = True
+                return output_path
 
             # ── Stage 3: Concatenate matte segments ──
             logger.info(
@@ -789,6 +881,7 @@ class Pipeline:
                     ss_sec=ss_sec,
                     dur_sec=dur_sec,
                     crf=config.crf,
+                    preset=config.encode_preset,
                     total_frames=num_to_process,
                 )
                 logger.info(
@@ -941,6 +1034,13 @@ class Pipeline:
             return output_path
 
         finally:
+            if self._assembler is not None:
+                # Abandoned mid-run (error/cancel): signal the
+                # worker's ffmpeg to stop, then wait it out.
+                if not completed:
+                    self._cancelled = True
+                self._assembler.abort()
+                self._assembler = None
             if self._eye_pool is not None:
                 self._eye_pool.shutdown(wait=True)
                 self._eye_pool = None
@@ -1484,7 +1584,14 @@ class Pipeline:
         self, config, cfg_hash, input_path,
         total_frames, seg_idx, frames_done, segments_dir,
     ):
-        """Persist resume state after a segment flush."""
+        """Persist resume state after a segment flush.
+
+        Also feeds the background assembler: any chapters fully
+        covered by flushed segments start assembling while
+        matting continues.
+        """
+        if self._assembler is not None:
+            self._assembler.maybe_submit(seg_idx)
         if not (config.auto_resume and cfg_hash):
             return
         ckpt = PipelineCheckpoint(

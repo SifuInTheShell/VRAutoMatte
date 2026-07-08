@@ -470,6 +470,25 @@ class MainWindow(QMainWindow):
         perf_row.addWidget(self.res_combo)
         perf_row.addSpacing(20)
 
+        enc_label = QLabel("Final Encode:")
+        enc_label.setToolTip(
+            "NVENC preset for the final DeoVR encode.\n\n"
+            "• Fast (p2) — ~1.5-2x faster encode, quality "
+            "difference negligible for passthrough content "
+            "(default)\n"
+            "• Balanced (p4)\n"
+            "• Quality (p6) — slowest\n\n"
+            "Only affects NVENC; CPU fallback ignores it."
+        )
+        perf_row.addWidget(enc_label)
+        self.encode_combo = QComboBox()
+        self.encode_combo.addItems([
+            "Fast (p2)", "Balanced (p4)", "Quality (p6)",
+        ])
+        self.encode_combo.setToolTip(enc_label.toolTip())
+        perf_row.addWidget(self.encode_combo)
+        perf_row.addSpacing(20)
+
         self.parallel_eyes_check = QCheckBox(
             "Parallel eyes"
         )
@@ -821,6 +840,9 @@ class MainWindow(QMainWindow):
         self.subjects_combo.setCurrentIndex(
             s.get("max_subjects", 0)
         )
+        self.encode_combo.setCurrentIndex(
+            s.get("encode_preset", 0)
+        )
         self.preview_check.setChecked(
             s.get("preview_enabled", True)
         )
@@ -854,6 +876,9 @@ class MainWindow(QMainWindow):
             ),
             "max_subjects": (
                 self.subjects_combo.currentIndex()
+            ),
+            "encode_preset": (
+                self.encode_combo.currentIndex()
             ),
             "preview_enabled": self.preview_check.isChecked(),
             "window_width": self.width(),
@@ -1394,6 +1419,9 @@ class MainWindow(QMainWindow):
             max_subjects=(
                 self.subjects_combo.currentIndex() + 1
             ),
+            encode_preset={
+                0: "p2", 1: "p4", 2: "p6",
+            }.get(self.encode_combo.currentIndex(), "p2"),
         )
 
         # Frame range
