@@ -113,12 +113,11 @@ def _check_matanyone2() -> bool:
 class MainWindow(QMainWindow):
     """Main application window.
 
-    Layout:
-    - File I/O section (input file, output file)
-    - Settings section (model, quality, projection, FOV)
-    - Preview section (source frame | generated matte)
-    - Batch queue (optional, collapsible)
-    - Action bar (Start button, progress bar, status)
+    Layout — three-way vertical QSplitter + pinned action bar:
+    - [splitter 0] Scrollable settings pane (file I/O, model, quality, etc.)
+    - [splitter 1] Preview (source frame | matte, scrubber)
+    - [splitter 2] Batch queue (shown when items are queued)
+    - Action bar (Start button, progress bar, status — fixed at bottom)
     """
 
     def __init__(self):
@@ -138,14 +137,24 @@ class MainWindow(QMainWindow):
         self._apply_theme()
         self.setAcceptDrops(True)
 
+    @property
+    def _ma2_index(self) -> int:
+        """Index of the MatAnyone 2 entry in the model combo."""
+        return 4
+
+    @property
+    def _sam2m_index(self) -> int:
+        """Index of the SAM2Matting entry in the model combo."""
+        return 5
+
     def _setup_ui(self):
         central = QWidget()
         self.setCentralWidget(central)
         outer = QVBoxLayout(central)
-        outer.setSpacing(6)
+        outer.setSpacing(0)
         outer.setContentsMargins(0, 0, 0, 0)
 
-        # ── Scrollable top section (file I/O + settings) ──
+        # ── Scrollable settings pane (goes into three-way splitter) ──
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
@@ -248,6 +257,9 @@ class MainWindow(QMainWindow):
             "• resnet50 — Better edge quality, slightly "
             "slower (~30 fps at 1080p). "
             "Detects ALL people. Best for crowds.\n"
+            "• ONNX variants — Same RVM models via ONNX "
+            "Runtime + DirectML. Works on any GPU vendor "
+            "(NVIDIA, AMD, Intel) without CUDA.\n"
             "• MatAnyone 2 (experimental) — Sharpest edges, "
             "best hair/transparency (~8 fps, ~6 GB VRAM). "
             "Tracks ONE person from the first frame.\n"
@@ -265,6 +277,8 @@ class MainWindow(QMainWindow):
         self.model_combo.addItems([
             "mobilenetv3 — all people, fast",
             "resnet50 — all people, quality",
+            "mobilenetv3 ONNX — DirectML, any GPU",
+            "resnet50 ONNX — DirectML, any GPU",
             "MatAnyone 2 (experimental, non-VR)"
             if self._ma2_available
             else "MatAnyone 2 (experimental) — click to install",
@@ -649,15 +663,13 @@ class MainWindow(QMainWindow):
         )
         settings_layout.addWidget(self.preview_check)
 
-        # End of scrollable section — add to outer layout
-        outer.addWidget(scroll)
-
-        # ── Preview + Batch (outside scroll, in a splitter) ──
+        # ── Preview widget ──
         self.preview = PreviewWidget()
         self.preview.frame_scrubbed.connect(
             self._on_frame_scrubbed
         )
 
+        # ── Batch queue ──
         self.batch_group = QGroupBox(
             "Batch Queue (0 files)"
         )
@@ -681,40 +693,23 @@ class MainWindow(QMainWindow):
         batch_layout.addLayout(batch_btn_row)
         self.batch_group.setVisible(False)
 
-        self._content_splitter = QSplitter(
+        # ── Three-way splitter: settings | preview | batch ──
+        self._main_splitter = QSplitter(
             Qt.Orientation.Vertical
         )
-        self._content_splitter.addWidget(self.preview)
-        self._content_splitter.addWidget(self.batch_group)
-        self._content_splitter.setStretchFactor(0, 3)
-        self._content_splitter.setStretchFactor(1, 1)
-        self._content_splitter.setChildrenCollapsible(False)
-        outer.addWidget(
-            self._content_splitter, stretch=1
-        )
+        self._main_splitter.addWidget(scroll)       # [0]
+        self._main_splitter.addWidget(self.preview)  # [1]
+        self._main_splitter.addWidget(self.batch_group)  # [2]
+        self._main_splitter.setStretchFactor(0, 2)
+        self._main_splitter.setStretchFactor(1, 3)
+        self._main_splitter.setStretchFactor(2, 2)
+        # Settings pane can collapse; preview and batch cannot
+        self._main_splitter.setCollapsible(0, True)
+        self._main_splitter.setCollapsible(1, False)
+        self._main_splitter.setCollapsible(2, False)
+        outer.addWidget(self._main_splitter, stretch=1)
 
-        # ── Action bar ──
-        action_layout = QHBoxLayout()
-
-        self.start_btn = QPushButton("▶  Start Processing")
-        self.start_btn.setObjectName("startButton")
-        self.start_btn.clicked.connect(self._start_processing)
-        action_layout.addWidget(self.start_btn)
-
-        self.cancel_btn = QPushButton("Cancel")
-        self.cancel_btn.setObjectName("cancelButton")
-        self.cancel_btn.setVisible(False)
-        self.cancel_btn.clicked.connect(self._cancel_processing)
-        action_layout.addWidget(self.cancel_btn)
-
-        action_layout.addSpacing(16)
-
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setRange(0, 100)
-        self.progress_bar.setValue(0)
-        action_layout.addWidget(self.progress_bar, stretch=1)
-
-        # ── Action bar (outside scroll) ──
+        # ── Action bar (pinned at bottom) ──
         action_bar = QWidget()
         action_bar.setContentsMargins(18, 0, 18, 0)
         ab_layout = QVBoxLayout(action_bar)
@@ -945,7 +940,7 @@ class MainWindow(QMainWindow):
         item = QListWidgetItem(f"{name}  →  {Path(output_path).name}")
         self.batch_list.addItem(item)
         self._update_batch_header()
-        self.batch_group.setVisible(True)
+        self._show_batch_pane()
 
         # Clear input for next file
         self.input_edit.clear()
@@ -984,7 +979,7 @@ class MainWindow(QMainWindow):
         )
         self.batch_list.addItem(item)
         self._update_batch_header()
-        self.batch_group.setVisible(True)
+        self._show_batch_pane()
         self.info_label.clear()
 
     def _remove_from_batch(self):
@@ -996,18 +991,37 @@ class MainWindow(QMainWindow):
                 self._batch_queue.pop(idx)
         self._update_batch_header()
         if not self._batch_queue:
-            self.batch_group.setVisible(False)
+            self._hide_batch_pane()
 
     def _clear_batch(self):
         """Clear the entire batch queue."""
         self._batch_queue.clear()
         self.batch_list.clear()
         self._update_batch_header()
-        self.batch_group.setVisible(False)
+        self._hide_batch_pane()
 
     def _update_batch_header(self):
         n = len(self._batch_queue)
         self.batch_group.setTitle(f"Batch Queue ({n} file{'s' if n != 1 else ''})")
+
+    def _show_batch_pane(self):
+        """Show batch queue and redistribute splitter space."""
+        if self.batch_group.isVisible():
+            return
+        self.batch_group.setVisible(True)
+        # Give batch pane ~30% of the splitter height
+        total = self._main_splitter.height()
+        settings_h = self._main_splitter.sizes()[0]
+        remaining = total - settings_h
+        preview_h = int(remaining * 0.6)
+        batch_h = remaining - preview_h
+        self._main_splitter.setSizes(
+            [settings_h, preview_h, batch_h]
+        )
+
+    def _hide_batch_pane(self):
+        """Hide batch queue and give its space to preview."""
+        self.batch_group.setVisible(False)
 
     # ── Slots ──
 
@@ -1254,7 +1268,10 @@ class MainWindow(QMainWindow):
         if it's missing, trigger the install flow and revert
         to the previous model.
         """
-        if index in (2, 3) and not self._ma2_available:
+        if (
+            index in (self._ma2_index, self._sam2m_index)
+            and not self._ma2_available
+        ):
             # Revert to previous selection before install
             self.model_combo.blockSignals(True)
             self.model_combo.setCurrentIndex(0)
@@ -1268,7 +1285,9 @@ class MainWindow(QMainWindow):
         c = self._colors
         if not self.pov_check.isChecked():
             self.pov_warning.setText("")
-        elif self.model_combo.currentIndex() in (2, 3):
+        elif self.model_combo.currentIndex() in (
+            self._ma2_index, self._sam2m_index,
+        ):
             self.pov_warning.setText(
                 "✓ Best quality (instance matting)"
             )
@@ -1319,8 +1338,10 @@ class MainWindow(QMainWindow):
         model_map = {
             0: "mobilenetv3",
             1: "resnet50",
-            2: "matanyone2",
-            3: "sam2matting",
+            2: "mobilenetv3_onnx",
+            3: "resnet50_onnx",
+            4: "matanyone2",
+            5: "sam2matting",
         }
 
         smooth_map = {0: 1.0, 1: 0.85, 2: 0.7, 3: 0.5}
@@ -1442,7 +1463,8 @@ class MainWindow(QMainWindow):
 
         # Check sam2 availability for features that need it
         needs_sam2 = (
-            self.model_combo.currentIndex() == 2
+            self.model_combo.currentIndex()
+            in (self._ma2_index, self._sam2m_index)
             or self.pov_check.isChecked()
         )
         if needs_sam2 and not self._ma2_available:
@@ -1556,11 +1578,13 @@ class MainWindow(QMainWindow):
 
     def _offer_install_matanyone2(self):
         """Ask user to install MatAnyone 2 deps, then install."""
-        feature = (
-            "MatAnyone 2"
-            if self.model_combo.currentIndex() == 2
-            else "POV mode"
-        )
+        idx = self.model_combo.currentIndex()
+        if idx == self._ma2_index:
+            feature = "MatAnyone 2"
+        elif idx == self._sam2m_index:
+            feature = "SAM2Matting"
+        else:
+            feature = "POV mode"
         reply = QMessageBox.question(
             self,
             "Install MatAnyone 2?",
@@ -1617,9 +1641,17 @@ class MainWindow(QMainWindow):
                 status.setText("✅ Installation complete!")
                 self._ma2_available = True
                 self.model_combo.setItemText(
-                    2, "MatAnyone 2 (experimental, non-VR)"
+                    self._ma2_index,
+                    "MatAnyone 2 (experimental, non-VR)",
                 )
-                self.model_combo.setCurrentIndex(2)
+                self.model_combo.setItemText(
+                    self._sam2m_index,
+                    "SAM2Matting (trial) — 1 person, "
+                    "fast + sharp",
+                )
+                self.model_combo.setCurrentIndex(
+                    self._ma2_index
+                )
             else:
                 status.setText("❌ Installation failed")
 

@@ -3,9 +3,11 @@
 import numpy as np
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtGui import QIntValidator
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QSlider,
     QVBoxLayout,
     QWidget,
@@ -87,7 +89,7 @@ class PreviewWidget(QWidget):
         self.source_label.setAlignment(
             Qt.AlignmentFlag.AlignCenter
         )
-        self.source_label.setMinimumSize(320, 180)
+        self.source_label.setMinimumSize(240, 135)
         source_pane.addWidget(self.source_label)
         pane_layout.addLayout(source_pane)
 
@@ -101,7 +103,7 @@ class PreviewWidget(QWidget):
         self.matte_label.setAlignment(
             Qt.AlignmentFlag.AlignCenter
         )
-        self.matte_label.setMinimumSize(320, 180)
+        self.matte_label.setMinimumSize(240, 135)
         matte_pane.addWidget(self.matte_label)
         pane_layout.addLayout(matte_pane)
 
@@ -111,9 +113,24 @@ class PreviewWidget(QWidget):
         scrubber_row = QHBoxLayout()
         scrubber_row.setSpacing(8)
 
-        self.frame_label = QLabel("—")
-        self.frame_label.setFixedWidth(130)
-        scrubber_row.addWidget(self.frame_label)
+        frame_lbl = QLabel("Frame")
+        scrubber_row.addWidget(frame_lbl)
+
+        self.frame_input = QLineEdit()
+        self.frame_input.setFixedWidth(70)
+        self.frame_input.setAlignment(
+            Qt.AlignmentFlag.AlignRight
+        )
+        self.frame_input.setPlaceholderText("—")
+        self.frame_input.setValidator(QIntValidator(0, 999_999_999))
+        self.frame_input.returnPressed.connect(
+            self._on_frame_input
+        )
+        scrubber_row.addWidget(self.frame_input)
+
+        self.total_label = QLabel("/ —")
+        self.total_label.setFixedWidth(80)
+        scrubber_row.addWidget(self.total_label)
 
         self.scrubber = QSlider(Qt.Orientation.Horizontal)
         self.scrubber.setRange(0, 0)
@@ -167,11 +184,25 @@ class PreviewWidget(QWidget):
             f"color: {c['preview_mono']}; "
             f"font-size: 11px; {_MONO}"
         )
-        self.frame_label.setStyleSheet(mono_lbl)
+        self.frame_input.setStyleSheet(mono_lbl)
+        self.total_label.setStyleSheet(mono_lbl)
         self.eta_label.setStyleSheet(mono_lbl)
 
     def _on_scrub(self, value: int):
+        self.frame_input.setText(f"{value:,}")
         self.frame_scrubbed.emit(value)
+
+    def _on_frame_input(self):
+        """Jump to the frame number typed in the input box."""
+        text = self.frame_input.text().replace(",", "")
+        if not text:
+            return
+        value = int(text)
+        lo, hi = self.scrubber.minimum(), self.scrubber.maximum()
+        if hi <= 0:
+            return
+        value = max(lo, min(value, hi))
+        self.scrubber.setValue(value)
 
     def update_preview(
         self,
@@ -194,9 +225,8 @@ class PreviewWidget(QWidget):
             )
         if total_frames > 0:
             self._total_frames = total_frames
-            self.frame_label.setText(
-                f"Frame {frame_num:,} / {total_frames:,}"
-            )
+            self.frame_input.setText(f"{frame_num:,}")
+            self.total_label.setText(f"/ {total_frames:,}")
             self.scrubber.blockSignals(True)
             self.scrubber.setRange(1, total_frames)
             self.scrubber.setValue(frame_num)
@@ -225,7 +255,8 @@ class PreviewWidget(QWidget):
         """Reset the preview to empty state."""
         self.source_label.clear()
         self.matte_label.clear()
-        self.frame_label.setText("—")
+        self.frame_input.clear()
+        self.total_label.setText("/ —")
         self.eta_label.setText("")
         self.perf_label.setText("")
         self.scrubber.blockSignals(True)

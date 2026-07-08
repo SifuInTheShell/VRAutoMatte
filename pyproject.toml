@@ -12,6 +12,8 @@ dependencies = [
     "numpy>=1.24",
     "Pillow>=10.0",
     "loguru>=0.7",
+    "onnxruntime-directml>=1.18; sys_platform == 'win32'",
+    "onnxruntime>=1.18; sys_platform != 'win32'",
 ]
 
 [project.scripts]
