@@ -460,9 +460,11 @@ def convert_to_fisheye(
             )
 
     vid_mb = video_path.stat().st_size / 1_048_576
+    enc_args = _encode_args(codec, crf)
     logger.info(
         f"convert_to_fisheye: input={video_path.name} "
-        f"({vid_mb:.0f} MB), FOV={fov}, codec={codec}"
+        f"({vid_mb:.0f} MB), FOV={fov}, "
+        f"encoder={enc_args[1]}"
     )
 
     # Get frame count for progress reporting
@@ -502,7 +504,7 @@ def convert_to_fisheye(
             if use_mask else []
         ),
         "-filter_complex", filter_complex,
-        *_encode_args(codec, crf), "-c:a", "copy",
+        *enc_args, "-c:a", "copy",
         str(output_path),
     ]
     _run_ffmpeg_logged(
