@@ -741,7 +741,68 @@ class Pipeline:
                 completed = True
                 return output_path
 
-            # ── Stage 4: Convert to fisheye ──
+            # ── Stages 4+5: DeoVR assembly ──
+            # Fused single-pass by default: one decode of source
+            # + matte, fisheye conversion(s) and alpha pack in a
+            # single filter graph, one encode. The legacy chain
+            # (trim → fisheye ×2 → pack, three encode
+            # generations) remains available via
+            # VRAUTOMATTE_NO_FUSED_ASSEMBLY=1.
+            use_fused = (
+                os.environ.get(
+                    "VRAUTOMATTE_NO_FUSED_ASSEMBLY"
+                ) != "1"
+            )
+            if use_fused:
+                fps = info["fps"]
+                start_0 = 0
+                if config.start_frame > 0:
+                    start_0 = config.start_frame - 1
+                ss_sec = start_0 / fps if fps > 0 else 0
+                dur_sec = (
+                    num_to_process / fps if fps > 0 else None
+                )
+
+                logger.info(
+                    "Stage 4+5: Fused DeoVR assembly "
+                    "(single pass)..."
+                )
+                self._emit(PipelineProgress(
+                    stage="Assembling DeoVR output "
+                          "(single pass)",
+                    stage_num=4,
+                    total_stages=total_stages,
+                ))
+                from vrautomatte.utils.ffmpeg import (
+                    assemble_deovr,
+                )
+                assemble_deovr(
+                    input_path, matte_video, output_path,
+                    is_equirect=(
+                        config.projection
+                        == ProjectionType.EQUIRECTANGULAR
+                    ),
+                    fov=config.fisheye_fov,
+                    mask_path=(
+                        config.fisheye_mask_path or None
+                    ),
+                    ss_sec=ss_sec,
+                    dur_sec=dur_sec,
+                    crf=config.crf,
+                    total_frames=num_to_process,
+                )
+                logger.info(
+                    f"Done! Alpha-packed video: {output_path}"
+                )
+                self._emit(PipelineProgress(
+                    stage="Complete",
+                    stage_num=total_stages,
+                    total_stages=total_stages,
+                ))
+                completed = True
+                return output_path
+
+            # ── Stage 4 (legacy): Convert to fisheye ──
             if (
                 config.projection
                 == ProjectionType.EQUIRECTANGULAR

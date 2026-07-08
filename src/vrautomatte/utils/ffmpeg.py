@@ -576,6 +576,219 @@ def matte_to_red_channel(input_path: str | Path,
     )
 
 
+def _alpha_pack_graph_parts(
+    W: int, H: int,
+    vid_label: str, matte_label: str,
+) -> list[str]:
+    """DeoVR alpha-pack filter graph as a parts list.
+
+    Scales the matte stream to 40%, converts it to red-only with
+    colorkey transparency, splits it into 6 segments, and overlays
+    them into the dark corners of the fisheye video stream.
+    Shared by pack_alpha (multi-pass) and assemble_deovr (fused)
+    so the packing geometry cannot drift between the two paths.
+
+    Args:
+        W, H: Dimensions of the fisheye video frame.
+        vid_label: Filter graph label of the fisheye video stream.
+        matte_label: Filter graph label of the matte stream.
+
+    Returns:
+        Filter graph fragments; the final fragment yields [out].
+    """
+    # ── DeoVR segment geometry (40% scale) ────────────────
+    w_out = W * 4 // 10
+    h_out = H * 4 // 10
+    hw = w_out // 2          # half-width of 40% matte
+    hh = h_out // 2          # half-height of 40% matte
+    qw = w_out // 4          # quarter-width
+
+    crops = [
+        (0,  0,  hw, hh),                # s1: left-top
+        (0,  hh, hw, hh),                # s2: left-bottom
+        (hw, 0,  qw, hh),                # s3: mid-right top
+        (w_out - qw, 0, qw, hh),         # s4: far-right top
+        (hw, hh, hw, hh),                # s5: right bottom
+        (w_out - qw, hh, qw, hh),        # s6: far-right bot
+    ]
+
+    x_ctr = W // 2 - hw // 2             # centred in left half
+    y_bot = H - hh                        # bottom edge
+    x_far = W - qw                        # right edge
+    positions = [
+        (x_ctr, y_bot),    # s1 → bottom-center
+        (x_ctr, 0),        # s2 → top-center
+        (x_far, y_bot),    # s3 → bottom-right
+        (0,     y_bot),    # s4 → bottom-left
+        (x_far, 0),        # s5 → top-right
+        (0,     0),         # s6 → top-left
+    ]
+
+    prep = (
+        f"{matte_label}scale={w_out}:{h_out},"
+        f"format=rgba,"
+        f"colorchannelmixer="
+        f"rr=1:rg=0:rb=0:ra=0:"
+        f"gr=0:gg=0:gb=0:ga=0:"
+        f"br=0:bg=0:bb=0:ba=0:"
+        f"ar=0:ag=0:ab=0:aa=1,"
+        f"colorkey=color=black:similarity=0.1,"
+        f"split=6"
+    )
+    seg_labels = "[o1][o2][o3][o4][o5][o6]"
+    parts = [f"{prep}{seg_labels}"]
+
+    for i, (cx, cy, cw, ch) in enumerate(crops):
+        parts.append(
+            f"[o{i+1}]crop={cw}:{ch}:{cx}:{cy}[s{i+1}]"
+        )
+
+    prev = vid_label
+    for i, (px, py) in enumerate(positions):
+        out = f"[a{i}]" if i < 5 else ",format=yuv420p[out]"
+        parts.append(
+            f"{prev}[s{i+1}]overlay={px}:{py}{out}"
+        )
+        if i < 5:
+            prev = f"[a{i}]"
+
+    return parts
+
+
+def _fisheye_graph_parts(
+    in_label: str, out_label: str, fov: int,
+    prefix: str,
+) -> list[str]:
+    """Equirect→fisheye conversion fragments for one stream.
+
+    Splits the SBS frame into eyes, applies v360 per eye, and
+    re-stacks. ``prefix`` namespaces the intermediate labels so
+    multiple streams can be converted in one graph.
+    """
+    v360 = (
+        f"v360=hequirect:fisheye:"
+        f"iv_fov=180:ih_fov=180:v_fov={fov}:h_fov={fov}"
+    )
+    p = prefix
+    return [
+        f"{in_label}split=2[{p}L][{p}R]",
+        f"[{p}L]crop=iw/2:ih:0:0[{p}Lc];"
+        f"[{p}R]crop=iw/2:ih:iw/2:0[{p}Rc]",
+        f"[{p}Lc]{v360}[{p}Lf];[{p}Rc]{v360}[{p}Rf]",
+        f"[{p}Lf][{p}Rf]hstack{out_label}",
+    ]
+
+
+def assemble_deovr(
+    source_path: str | Path,
+    matte_path: str | Path,
+    output_path: str | Path,
+    *,
+    is_equirect: bool,
+    fov: int = 180,
+    mask_path: str | Path | None = None,
+    ss_sec: float = 0.0,
+    dur_sec: float | None = None,
+    codec: str = "libsvtav1",
+    crf: int = 18,
+    total_frames: int = 0,
+) -> None:
+    """Fused single-pass DeoVR assembly.
+
+    Replaces the trim → fisheye(video) → fisheye(matte) → pack
+    chain (three decode/encode generations, two intermediate
+    files) with ONE ffmpeg invocation: each input is decoded
+    once, the fisheye conversions and the alpha pack run in a
+    single filter graph, and the output is encoded once.
+    Roughly halves assembly time and removes a lossy
+    intermediate generation.
+
+    Args:
+        source_path: Original source video (full length).
+        matte_path: Matte video covering exactly the processed
+            frame range (any resolution — the pack graph
+            rescales it).
+        output_path: Final DeoVR alpha-packed video.
+        is_equirect: Convert both streams equirect→fisheye.
+            False = source is already fisheye (no conversion,
+            no DeoVR mask — matches the legacy path).
+        fov: Fisheye field of view for v360.
+        mask_path: DeoVR circular mask PNG overlaid on the
+            converted video (equirect only). None/empty = skip.
+        ss_sec: Trim start in seconds (0 = from the beginning).
+        dur_sec: Output duration in seconds (None = full).
+        codec: Output codec (NVENC-upgraded when available;
+            _run_ffmpeg_logged retries on CPU on failure).
+        crf: Encode quality.
+        total_frames: For progress percentage display.
+    """
+    source_path = Path(source_path)
+    info = get_video_info(source_path)
+    W, H = info["width"], info["height"]
+
+    use_mask = bool(mask_path) and is_equirect
+    if use_mask and not Path(mask_path).exists():
+        logger.warning(
+            f"Fisheye mask not found: {mask_path} — "
+            "assembling without mask overlay"
+        )
+        use_mask = False
+
+    parts: list[str] = []
+    if is_equirect:
+        parts += _fisheye_graph_parts(
+            "[0:v]", "[stk]", fov, "F"
+        )
+        if use_mask:
+            parts.append("[2:v][stk]scale2ref[msk][base]")
+            parts.append(
+                "[base][msk]overlay=0:0:shortest=1[vid]"
+            )
+        else:
+            parts.append("[stk]null[vid]")
+        parts += _fisheye_graph_parts(
+            "[1:v]", "[mat]", fov, "M"
+        )
+    else:
+        # Native fisheye: pass streams straight to the pack.
+        parts.append("[0:v]null[vid]")
+        parts.append("[1:v]null[mat]")
+
+    parts += _alpha_pack_graph_parts(W, H, "[vid]", "[mat]")
+    filter_complex = ";".join(parts)
+
+    cmd = [
+        "ffmpeg", "-y",
+        *_hwaccel_args(),
+        *(["-ss", f"{ss_sec:.4f}"] if ss_sec > 0 else []),
+        "-i", str(source_path),
+        "-i", str(matte_path),
+        *(
+            ["-loop", "1", "-i", str(mask_path)]
+            if use_mask else []
+        ),
+        "-filter_complex", filter_complex,
+        "-map", "[out]", "-map", "0:a?",
+        *(
+            ["-t", f"{dur_sec:.4f}"]
+            if dur_sec is not None else []
+        ),
+        *_encode_args(codec, crf), "-c:a", "copy",
+        str(output_path),
+    ]
+    logger.info(
+        f"assemble_deovr: single-pass assembly "
+        f"({'equirect->fisheye' if is_equirect else 'fisheye'}"
+        f"{', masked' if use_mask else ''}, "
+        f"ss={ss_sec:.1f}s"
+        + (f", dur={dur_sec:.1f}s" if dur_sec else "")
+        + ")"
+    )
+    _run_ffmpeg_logged(
+        cmd, "deovr-fused", total_frames=total_frames
+    )
+
+
 def pack_alpha(
     video_path: str | Path,
     matte_path: str | Path,
@@ -635,37 +848,9 @@ def pack_alpha(
         (0,     0),         # s6 → top-left
     ]
 
-    # ── Build ffmpeg filter chain ─────────────────────────
-    # Scale matte to 40%, make red-only, colorkey black→transparent
-    prep = (
-        f"[1:v]scale={w_out}:{h_out},"
-        f"format=rgba,"
-        f"colorchannelmixer="
-        f"rr=1:rg=0:rb=0:ra=0:"
-        f"gr=0:gg=0:gb=0:ga=0:"
-        f"br=0:bg=0:bb=0:ba=0:"
-        f"ar=0:ag=0:ab=0:aa=1,"
-        f"colorkey=color=black:similarity=0.1,"
-        f"split=6"
+    filter_complex = ";".join(
+        _alpha_pack_graph_parts(W, H, "[0:v]", "[1:v]")
     )
-    seg_labels = "[o1][o2][o3][o4][o5][o6]"
-    parts = [f"{prep}{seg_labels}"]
-
-    for i, (cx, cy, cw, ch) in enumerate(crops):
-        parts.append(
-            f"[o{i+1}]crop={cw}:{ch}:{cx}:{cy}[s{i+1}]"
-        )
-
-    prev = "[0:v]"
-    for i, (px, py) in enumerate(positions):
-        out = f"[a{i}]" if i < 5 else ",format=yuv420p[out]"
-        parts.append(
-            f"{prev}[s{i+1}]overlay={px}:{py}{out}"
-        )
-        if i < 5:
-            prev = f"[a{i}]"
-
-    filter_complex = ";".join(parts)
 
     cmd = [
         "ffmpeg", "-y",
