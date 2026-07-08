@@ -532,22 +532,42 @@ def generate_person_masks(
     )
 
 
+def _skin_fraction_mask(rgb: np.ndarray) -> np.ndarray:
+    """Per-pixel skin-tone gate (classic YCbCr ranges)."""
+    r = rgb[..., 0].astype(np.float32)
+    g = rgb[..., 1].astype(np.float32)
+    b = rgb[..., 2].astype(np.float32)
+    cb = 128 - 0.168736 * r - 0.331264 * g + 0.5 * b
+    cr = 128 + 0.5 * r - 0.418688 * g - 0.081312 * b
+    return (
+        (cb >= 77) & (cb <= 127)
+        & (cr >= 133) & (cr <= 173)
+    )
+
+
+# Prompt grid (fractions of width/height) — spans the fisheye
+# circle so subjects are found wherever the camera looks
+# (centered, lying below, off to a side).
+_PROMPT_XS = (0.35, 0.50, 0.65)
+_PROMPT_YS = (0.30, 0.45, 0.60, 0.75)
+
+
 def _run_sam2_prompted(
     frame: np.ndarray,
     device: torch.device | None = None,
-) -> tuple:
-    """Segment the centered subject with a point prompt.
+) -> list | None:
+    """Grid-prompted candidate masks for the subject.
 
     Prompted segmentation is far more reliable than the
     automatic mask generator for close-up subjects on fisheye
     VR frames, where AMG often fragments the person into
-    clothing/limb pieces or misses them entirely. The prompt
-    sits slightly above frame center — where the subject is
-    by construction in VR POV content.
+    clothing/limb pieces or misses them entirely. A single
+    fixed prompt fails when the camera looks away from the
+    subject, so a grid of prompts is probed instead.
 
     Returns:
-        (masks, scores) from SAM2ImagePredictor, or (None,
-        None) if sam2 is unavailable.
+        List of (mask, predictor_score) or None if sam2 is
+        unavailable.
     """
     from vrautomatte.pipeline.sam2matting import stock_sam2
 
@@ -557,7 +577,7 @@ def _run_sam2_prompted(
                 SAM2ImagePredictor,
             )
         except ImportError:
-            return None, None
+            return None
 
         if device is None:
             device = get_device()
@@ -572,13 +592,22 @@ def _run_sam2_prompted(
             variant, device=str(device)
         )
         h, w = frame.shape[:2]
-        points = np.array([[w // 2, int(h * 0.45)]])
         predictor.set_image(frame)
-        masks, scores, _ = predictor.predict(
-            point_coords=points,
-            point_labels=np.array([1]),
-            multimask_output=True,
-        )
+        candidates = []
+        for fy in _PROMPT_YS:
+            for fx in _PROMPT_XS:
+                points = np.array(
+                    [[int(w * fx), int(h * fy)]]
+                )
+                masks, scores, _ = predictor.predict(
+                    point_coords=points,
+                    point_labels=np.array([1]),
+                    multimask_output=True,
+                )
+                candidates.extend(
+                    (m.astype(bool), float(s))
+                    for m, s in zip(masks, scores)
+                )
 
         del predictor
         gc.collect()
@@ -586,43 +615,60 @@ def _run_sam2_prompted(
             torch.cuda.empty_cache()
         logger.debug("SAM2 unloaded, GPU memory freed")
 
-    return masks, scores
+    return candidates
 
 
 def _select_prompted_subject(
     frame: np.ndarray,
     device: torch.device | None = None,
 ) -> np.ndarray | None:
-    """Prompted subject mask, or None if implausible.
+    """Best person-plausible prompted mask, or None.
 
-    Picks the highest-scoring prompted mask whose area is
-    person-plausible (2%-60% of the frame). None means the
-    caller should fall back to AMG-based selection.
+    Candidates are gated on person-plausible size (2%-60%),
+    skin-tone fraction, and aspect ratio (rejects wide
+    floor/ceiling slabs), deduped by IoU, then scored on
+    size, predictor confidence, and skin coverage. None means
+    the caller should fall back to AMG-based selection.
     """
-    masks, scores = _run_sam2_prompted(frame, device)
-    if masks is None:
+    candidates = _run_sam2_prompted(frame, device)
+    if candidates is None:
         return None
 
     h, w = frame.shape[:2]
     total_px = h * w
-    best = None
-    for m, s in sorted(
-        zip(masks, scores), key=lambda x: -x[1]
-    ):
+    skin = _skin_fraction_mask(frame)
+
+    scored = []
+    for m, pred_score in candidates:
         area_frac = m.sum() / total_px
-        if 0.02 <= area_frac <= 0.60 and s >= 0.5:
-            best = (m, s, area_frac)
-            break
-    if best is None:
+        if not (0.02 <= area_frac <= 0.60):
+            continue
+        skin_frac = float(skin[m].mean())
+        ys, xs = np.where(m)
+        aspect = (ys.max() - ys.min() + 1) / max(
+            xs.max() - xs.min() + 1, 1
+        )
+        if skin_frac < 0.12 or aspect < 0.55:
+            continue
+        score = (
+            0.3 * pred_score
+            + 0.5 * min(area_frac, 0.35) / 0.35
+            + 0.2 * skin_frac
+        )
+        scored.append((score, m, pred_score, area_frac))
+
+    if not scored:
         logger.info(
-            "Prompted subject mask implausible — falling "
+            "No person-plausible prompted mask — falling "
             "back to automatic mask selection"
         )
         return None
 
-    m, s, area_frac = best
+    scored.sort(key=lambda x: -x[0])
+    # Dedupe not needed for the winner — take the best.
+    _, m, pred_score, area_frac = scored[0]
     logger.info(
-        f"Prompted subject mask: score={s:.2f}, "
+        f"Prompted subject mask: score={pred_score:.2f}, "
         f"coverage={int(m.sum())}/{total_px}"
     )
     return m.astype(np.uint8) * 255
