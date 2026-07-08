@@ -40,6 +40,7 @@ import os
 import shutil
 import sys
 import urllib.request
+import warnings
 import zipfile
 from contextlib import contextmanager
 from pathlib import Path
@@ -352,6 +353,13 @@ class SAM2MattingProcessor:
         logger.info("SAM2Matting loaded")
         self._patch_alpha_head_devices()
         self._patch_frame_loader_dtype()
+        # The fork warns about its missing optional _C
+        # extension on every chunk — benign per SAM2's own
+        # message, and it floods the log twice per chunk.
+        warnings.filterwarnings(
+            "ignore",
+            message=r"cannot import name '_C'",
+        )
 
         if isinstance(first_frame_mask, np.ndarray):
             self._next_masks = [first_frame_mask]
@@ -467,14 +475,19 @@ class SAM2MattingProcessor:
             frames_dir.name + f"_s{stride}"
         )
         if sub.exists():
-            shutil.rmtree(sub)
-        sub.mkdir()
+            shutil.rmtree(sub, ignore_errors=True)
+        sub.mkdir(exist_ok=True)
         for f in files[::stride]:
             target = sub / f.name
+            if target.exists():
+                continue
             try:
                 os.link(f, target)
             except OSError:
-                shutil.copy2(f, target)
+                try:
+                    shutil.copy2(f, target)
+                except shutil.SameFileError:
+                    pass
         return sub
 
     def process_chunk(

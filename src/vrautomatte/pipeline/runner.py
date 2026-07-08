@@ -1091,6 +1091,7 @@ class Pipeline:
                         frame_files, mattes_dir,
                         global_frame_idx, num_to_process,
                         estimated_disk_gb,
+                        parallel=config.sbs_parallel_eyes,
                     )
                     global_frame_idx += seg_frame
                 else:
@@ -1223,17 +1224,82 @@ class Pipeline:
             config, right_seed
         )
 
+    @staticmethod
+    def _zip_parallel(gen_l, gen_r):
+        """Step two matte generators on worker threads.
+
+        zip() alternates the generators on one thread, so each
+        eye's GPU work idles while the other runs its Python
+        stage. Worker threads let the two propagations overlap.
+        Bounded queues keep memory flat; generators are closed
+        on early exit so their inference state is released.
+        """
+        import queue as queue_mod
+
+        done = object()
+        stop = threading.Event()
+
+        def put(q, item):
+            while not stop.is_set():
+                try:
+                    q.put(item, timeout=0.25)
+                    return True
+                except queue_mod.Full:
+                    continue
+            return False
+
+        def pump(gen, q):
+            try:
+                for item in gen:
+                    if not put(q, item):
+                        return
+                put(q, done)
+            except BaseException as exc:  # noqa: BLE001
+                put(q, exc)
+            finally:
+                gen.close()
+
+        q_l = queue_mod.Queue(maxsize=4)
+        q_r = queue_mod.Queue(maxsize=4)
+        threads = [
+            threading.Thread(
+                target=pump, args=(gen_l, q_l),
+                name="eye-L", daemon=True,
+            ),
+            threading.Thread(
+                target=pump, args=(gen_r, q_r),
+                name="eye-R", daemon=True,
+            ),
+        ]
+        for t in threads:
+            t.start()
+        try:
+            while True:
+                a = q_l.get()
+                b = q_r.get()
+                if isinstance(a, BaseException):
+                    raise a
+                if isinstance(b, BaseException):
+                    raise b
+                if a is done or b is done:
+                    break
+                yield a, b
+        finally:
+            stop.set()
+
     def _matte_chunk_level(
         self, processor, proc_l, proc_r, use_sbs,
         chunk_dir, frame_files, mattes_dir,
         start_idx, total, estimated_disk_gb,
+        parallel=False,
     ):
         """Run a chunk-level processor over one extracted chunk.
 
         Chunk-level processors (SAM2Matting) consume a whole
         frame directory and yield mattes as a generator. For
-        SBS the two eye generators are stepped in lockstep and
-        the mattes merged.
+        SBS the two eye generators are stepped in lockstep —
+        on worker threads when ``parallel`` — and the mattes
+        merged.
 
         Returns:
             Number of frames matted (matte PNGs written).
@@ -1241,10 +1307,15 @@ class Pipeline:
         if use_sbs:
             left_dir = chunk_dir / "left"
             right_dir = chunk_dir / "right"
-            gen = zip(
-                proc_l.process_chunk(left_dir),
-                proc_r.process_chunk(right_dir),
-            )
+            gen_l = proc_l.process_chunk(left_dir)
+            gen_r = proc_r.process_chunk(right_dir)
+            if parallel and proc_l is not proc_r:
+                logger.debug(
+                    "SBS chunk matting: parallel eyes"
+                )
+                gen = self._zip_parallel(gen_l, gen_r)
+            else:
+                gen = zip(gen_l, gen_r)
             stage = "Matting SBS (L+R)"
         else:
             gen = (
