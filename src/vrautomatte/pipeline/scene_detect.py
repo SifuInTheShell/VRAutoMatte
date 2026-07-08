@@ -95,13 +95,16 @@ class SceneChangeDetector:
     ) -> np.ndarray:
         """Compute normalized color histogram.
 
-        Uses a downsampled grayscale conversion for speed.
+        Uses a downsampled grayscale conversion for speed —
+        8x8 stride sampling keeps the distribution while
+        cutting the per-frame cost ~64x (this runs per eye
+        per frame in the matting hot loop).
         """
-        # Convert to grayscale via luminance
+        small = frame[::8, ::8].astype(np.float32)
         gray = (
-            0.299 * frame[:, :, 0]
-            + 0.587 * frame[:, :, 1]
-            + 0.114 * frame[:, :, 2]
+            0.299 * small[:, :, 0]
+            + 0.587 * small[:, :, 1]
+            + 0.114 * small[:, :, 2]
         )
         hist, _ = np.histogram(
             gray, bins=bins, range=(0, 256)

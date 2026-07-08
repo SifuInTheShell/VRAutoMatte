@@ -151,6 +151,7 @@ class POVExclusionProcessor:
         self._device = device or get_device()
         self._set_exclusion_mask(pov_body_mask)
         self._exclusion_r: np.ndarray | None = None
+        self._excl_bbox_r: tuple | None = None
         self._scene_detector = SceneChangeDetector()
 
     @property
@@ -159,15 +160,29 @@ class POVExclusionProcessor:
         return getattr(self._inner, "supports_pair", False)
 
     @staticmethod
-    def _to_exclusion(mask: np.ndarray) -> np.ndarray:
-        """Binary body mask (255=body) -> float keep-factor."""
-        return 1.0 - mask.astype(np.float32) / 255.0
+    def _to_exclusion(mask: np.ndarray) -> tuple:
+        """Body mask (255=body) -> (keep-factor, bbox).
+
+        The bbox bounds the excluded region so the per-frame
+        multiply touches only those pixels (typically a few
+        percent of the frame) instead of all of them.
+        """
+        excl = 1.0 - mask.astype(np.float32) / 255.0
+        ys, xs = np.where(mask > 0)
+        bbox = (
+            (int(ys.min()), int(ys.max()) + 1,
+             int(xs.min()), int(xs.max()) + 1)
+            if len(ys) else None
+        )
+        return excl, bbox
 
     def _set_exclusion_mask(
         self, mask: np.ndarray
     ) -> None:
         """Set or update the (left/primary) exclusion mask."""
-        self._exclusion = self._to_exclusion(mask)
+        self._exclusion, self._excl_bbox = (
+            self._to_exclusion(mask)
+        )
         logger.info(
             "POV exclusion mask set — "
             f"covers {(mask > 0).sum()} px"
@@ -190,9 +205,17 @@ class POVExclusionProcessor:
         self._scene_detector.update_reference(frame)
 
     def _apply_exclusion(
-        self, matte: np.ndarray, excl: np.ndarray
+        self,
+        matte: np.ndarray,
+        excl: np.ndarray,
+        bbox: tuple | None,
     ) -> np.ndarray:
-        """Multiply matte by the exclusion keep-factor."""
+        """Multiply matte by the exclusion keep-factor.
+
+        Only the excluded region's bbox is touched; the matte
+        (a fresh array from the inner processor) is modified
+        in place.
+        """
         if excl.shape != matte.shape:
             from PIL import Image as _Img
             excl_img = _Img.fromarray(
@@ -205,8 +228,17 @@ class POVExclusionProcessor:
                 np.array(excl_img).astype(np.float32)
                 / 255.0
             )
-        result = matte.astype(np.float32) * excl
-        return result.clip(0, 255).astype(np.uint8)
+            result = matte.astype(np.float32) * excl
+            return result.clip(0, 255).astype(np.uint8)
+        if bbox is None:
+            return matte
+        y0, y1, x0, x1 = bbox
+        region = matte[y0:y1, x0:x1].astype(np.float32)
+        region *= excl[y0:y1, x0:x1]
+        matte[y0:y1, x0:x1] = (
+            region.clip(0, 255).astype(np.uint8)
+        )
+        return matte
 
     def process_frame(self, frame: np.ndarray) -> np.ndarray:
         """Process frame, refresh mask on scene change."""
@@ -214,7 +246,9 @@ class POVExclusionProcessor:
             self._refresh_mask(frame)
 
         matte = self._inner.process_frame(frame)
-        return self._apply_exclusion(matte, self._exclusion)
+        return self._apply_exclusion(
+            matte, self._exclusion, self._excl_bbox
+        )
 
     def process_frame_pair(self, left, right):
         """Batched two-eye processing with per-eye exclusion."""
@@ -223,19 +257,27 @@ class POVExclusionProcessor:
                 "POV pair mode: generating right-eye "
                 "exclusion mask..."
             )
-            self._exclusion_r = self._to_exclusion(
-                self._generate_body_mask(right)
+            self._exclusion_r, self._excl_bbox_r = (
+                self._to_exclusion(
+                    self._generate_body_mask(right)
+                )
             )
         if self._scene_detector.check(left):
             self._refresh_mask(left)
-            self._exclusion_r = self._to_exclusion(
-                self._generate_body_mask(right)
+            self._exclusion_r, self._excl_bbox_r = (
+                self._to_exclusion(
+                    self._generate_body_mask(right)
+                )
             )
 
         lm, rm = self._inner.process_frame_pair(left, right)
         return (
-            self._apply_exclusion(lm, self._exclusion),
-            self._apply_exclusion(rm, self._exclusion_r),
+            self._apply_exclusion(
+                lm, self._exclusion, self._excl_bbox
+            ),
+            self._apply_exclusion(
+                rm, self._exclusion_r, self._excl_bbox_r
+            ),
         )
 
     def reset(self) -> None:

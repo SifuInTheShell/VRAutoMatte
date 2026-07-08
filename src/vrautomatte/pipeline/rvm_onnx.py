@@ -180,6 +180,44 @@ class RVMOnnxProcessor:
         """Reset recurrent state (call between videos)."""
         self._rec = _empty_rec()
 
+    @property
+    def supports_pair(self) -> bool:
+        """Both eyes batch through one session call."""
+        return True
+
+    def _run(self, src: np.ndarray) -> np.ndarray:
+        """One session call; updates recurrent state.
+
+        The zero-init [1,1,1,1] states broadcast to any batch
+        size inside the graph; thereafter the state carries
+        the batch dimension of the src it was produced from.
+        """
+        inputs = {
+            "src": src,
+            "r1i": self._rec[0],
+            "r2i": self._rec[1],
+            "r3i": self._rec[2],
+            "r4i": self._rec[3],
+            "downsample_ratio": self._downsample_ratio,
+        }
+        outputs = self._session.run(
+            ["fgr", "pha", "r1o", "r2o", "r3o", "r4o"],
+            inputs,
+        )
+        _fgr, pha, r1o, r2o, r3o, r4o = outputs
+        self._rec = [r1o, r2o, r3o, r4o]
+        return pha
+
+    def _guard_batch(self, batch: int) -> None:
+        """Reset state if it carries a different batch size."""
+        b = self._rec[0].shape[0]
+        if b != 1 and b != batch:
+            logger.debug(
+                "RVM ONNX: batch size changed "
+                f"({b} -> {batch}), resetting state"
+            )
+            self.reset()
+
     def process_frame(self, frame: np.ndarray) -> np.ndarray:
         """Process a single RGB frame and return alpha matte.
 
@@ -189,33 +227,37 @@ class RVMOnnxProcessor:
         Returns:
             Alpha matte (H, W), uint8 (0-255).
         """
+        self._guard_batch(1)
         # HWC uint8 → CHW float32 [0, 1] with batch dim.
-        src = (
-            frame.astype(np.float32) / 255.0
-        )
+        src = frame.astype(np.float32) / 255.0
         src = np.transpose(src, (2, 0, 1))  # HWC → CHW
         src = np.expand_dims(src, 0)        # [1, 3, H, W]
 
-        inputs = {
-            "src": src,
-            "r1i": self._rec[0],
-            "r2i": self._rec[1],
-            "r3i": self._rec[2],
-            "r4i": self._rec[3],
-            "downsample_ratio": self._downsample_ratio,
-        }
-
-        outputs = self._session.run(
-            ["fgr", "pha", "r1o", "r2o", "r3o", "r4o"],
-            inputs,
-        )
-
-        _fgr, pha, r1o, r2o, r3o, r4o = outputs
-        self._rec = [r1o, r2o, r3o, r4o]
-
+        pha = self._run(src)
         # pha shape: [1, 1, H, W], float32 [0, 1].
         matte = (pha[0, 0] * 255).clip(0, 255).astype(np.uint8)
         return matte
+
+    def process_frame_pair(self, left, right):
+        """Matte both SBS eyes in one batched session call.
+
+        Recurrent state is per-sample, so batching is exactly
+        equivalent to two independent single-eye streams.
+
+        Returns:
+            (left_matte, right_matte), uint8 (H, W) each.
+        """
+        self._guard_batch(2)
+        src = (
+            np.stack([left, right]).astype(np.float32)
+            / 255.0
+        )
+        src = np.transpose(src, (0, 3, 1, 2))  # [2, 3, H, W]
+
+        pha = self._run(src)
+        lm = (pha[0, 0] * 255).clip(0, 255).astype(np.uint8)
+        rm = (pha[1, 0] * 255).clip(0, 255).astype(np.uint8)
+        return lm, rm
 
     def cleanup(self) -> None:
         """Release ONNX session."""
