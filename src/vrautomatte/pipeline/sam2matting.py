@@ -333,6 +333,7 @@ class SAM2MattingProcessor:
             )
         logger.info("SAM2Matting loaded")
         self._patch_alpha_head_devices()
+        self._patch_frame_loader_dtype()
 
         if isinstance(first_frame_mask, np.ndarray):
             self._next_masks = [first_frame_mask]
@@ -379,6 +380,36 @@ class SAM2MattingProcessor:
             return orig(*args, **kwargs)
 
         predictor._forward_alpha_heads = wrapper
+
+    def _patch_frame_loader_dtype(self) -> None:
+        """Work around a fork bug in the frame loader.
+
+        _load_img_as_tensor divides a uint8 numpy array by
+        255.0, which promotes to float64. The synchronous
+        loader masks this by copying into a preallocated
+        float32 tensor, but AsyncVideoFrameLoader hands the
+        double tensors straight to the model and conv2d
+        rejects them. Cast to float32 at the source (also
+        halves CPU RAM per loaded chunk).
+        """
+        try:
+            from sam2.utils import misc as fork_misc
+        except ImportError:
+            return
+        orig = getattr(
+            fork_misc, "_load_img_as_tensor", None
+        )
+        if orig is None or getattr(
+            orig, "_f32_patched", False
+        ):
+            return
+
+        def load_f32(img_path, image_size):
+            img, h, w = orig(img_path, image_size)
+            return img.float(), h, w
+
+        load_f32._f32_patched = True
+        fork_misc._load_img_as_tensor = load_f32
 
     # ── chunk-level API ─────────────────────────────────────
 
@@ -460,16 +491,28 @@ class SAM2MattingProcessor:
                 self._next_masks = [merged]
 
     def _init_state(self, frames_dir: str):
-        """init_state with video frames offloaded to CPU RAM."""
+        """init_state with frames offloaded to CPU RAM.
+
+        async_loading_frames decodes JPEGs in a background
+        thread so GPU matting starts on frame 0 immediately
+        instead of blocking on the full chunk load.
+        """
         try:
             return self._predictor.init_state(
                 video_path=frames_dir,
                 offload_video_to_cpu=True,
+                async_loading_frames=True,
             )
         except TypeError:
-            return self._predictor.init_state(
-                video_path=frames_dir,
-            )
+            try:
+                return self._predictor.init_state(
+                    video_path=frames_dir,
+                    offload_video_to_cpu=True,
+                )
+            except TypeError:
+                return self._predictor.init_state(
+                    video_path=frames_dir,
+                )
 
     def _release_state(self, state) -> None:
         try:
