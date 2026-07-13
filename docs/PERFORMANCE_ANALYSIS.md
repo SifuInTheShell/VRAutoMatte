@@ -135,7 +135,7 @@ This removes **all** PNG codec work, all frame disk I/O, and the temp-space
 problem for source frames entirely (checkpoint/resume still works at segment
 granularity — on resume, seek to `resume_frames / fps` and restart the reader).
 
-Note on the Windows pipe gotchas in CLAUDE.md: those deadlocks came from
+Note on the Windows pipe gotchas documented earlier in this project: those deadlocks came from
 ffmpeg's *stderr* progress stream (`\r`-terminated, unbounded) and unread
 pipes filling their 64 KB buffer. A `rawvideo` **stdout** stream with
 `stderr=DEVNULL` and exact `read(w*h*3)` calls is the safe pattern — the
