@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Automated video matting and alpha channel generation for VR passthrough content"
 readme = "README.md"
 requires-python = ">=3.10"
-license = "MIT"
+license = "GPL-3.0-or-later"
 dependencies = [
     "torch>=2.0",
     "torchvision>=0.15",

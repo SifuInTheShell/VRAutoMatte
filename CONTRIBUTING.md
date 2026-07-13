@@ -14,7 +14,7 @@ uv sync --extra matanyone2   # or just `uv sync` for RVM-only
 uv run python -m unittest discover -s tests -p "test_*.py"
 ```
 
-All 50 tests should pass. Tests mock GPU and filesystem operations — no GPU or FFmpeg required to run them.
+All 97 tests should pass. Tests mock GPU and filesystem operations — no GPU or FFmpeg required to run them.
 
 ## Code Style
 
@@ -49,3 +49,10 @@ style: adjust light theme contrast
 ## Project Structure
 
 See the [Architecture section](README.md#architecture) in the README.
+
+## License
+
+VRAutoMatte is licensed under the **GPL-3.0-or-later**. By contributing, you agree
+that your contributions are licensed under the same terms. This is a copyleft
+project: anyone who distributes a modified version must make their source
+available under the GPL as well, so improvements flow back to the community.
